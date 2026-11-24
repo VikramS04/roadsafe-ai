@@ -1,0 +1,75 @@
+services:
+  db:
+    image: postgis/postgis:15-3.4
+    container_name: roadsafe-db
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: roadsafe_ai
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgis_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d roadsafe_ai"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  routing-engine:
+    build:
+      context: ../backend/routing-engine
+      dockerfile: Dockerfile
+    container_name: roadsafe-routing-engine
+    restart: always
+    expose:
+      - "8000"
+    environment:
+      - PORT=8000
+      - HOST=0.0.0.0
+    networks:
+      - default
+
+  node-api:
+    build:
+      context: ../backend/node-api
+      dockerfile: Dockerfile
+    container_name: roadsafe-node-api
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/roadsafe_ai?schema=public
+      - JWT_SECRET=roadsafe_ai_jwt_super_secret_key_2026_emergency_response
+      - PYTHON_ROUTING_URL=http://routing-engine:8000
+      - NODE_ENV=production
+    depends_on:
+      db:
+        condition: service_healthy
+      routing-engine:
+        condition: service_started
+    networks:
+      - default
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    container_name: roadsafe-frontend
+    restart: always
+    ports:
+      - "5173:5173"
+    depends_on:
+      - node-api
+    networks:
+      - default
+
+volumes:
+  postgis_data:
+
+networks:
+  default:
+    driver: bridge
+

@@ -1,0 +1,162 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model DeviceProfile {
+  id               String         @id @default(uuid())
+  deviceId         String         @unique
+  reliabilityScore Float          @default(1.0) // Weights device votes (0.1 - 2.0)
+  reportCount      Int            @default(0)
+  voteCount        Int            @default(0)
+  lastActiveAt     DateTime       @default(now())
+  createdAt        DateTime       @default(now())
+  votes            HazardVote[]
+  reports          HazardReport[]
+}
+
+model HazardReport {
+  id           String        @id @default(uuid())
+  type         String        // landslide, flooded_road, fallen_tree, damaged_road, bridge_damaged, road_blocked, fog_visibility, other
+  severity     String        // low, medium, high, critical
+  edgeId       String?       // Nearest snapped road segment
+  lat          Float
+  lng          Float
+  status       String        @default("unverified") // unverified, confirmed, cleared, expired
+  confirmCount Int           @default(1)
+  clearCount   Int           @default(0)
+  note         String?
+  photoUrl     String?
+  deviceId     String
+  device       DeviceProfile? @relation(fields: [deviceId], references: [deviceId])
+  reportedAt   DateTime      @default(now())
+  expiresAt    DateTime      // Default 6 hours from report time
+  updatedAt    DateTime      @updatedAt
+  votes        HazardVote[]
+}
+
+model HazardVote {
+  id        String       @id @default(uuid())
+  reportId  String
+  report    HazardReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  deviceId  String
+  device    DeviceProfile? @relation(fields: [deviceId], references: [deviceId])
+  vote      String       // yes, no, cleared
+  lat       Float?       // Voter location for ~5km proximity check
+  lng       Float?
+  createdAt DateTime     @default(now())
+
+  @@unique([reportId, deviceId])
+}
+
+model HazardEvent {
+  id         String   @id @default(uuid())
+  eventType  String   // REPORT_CREATED, VOTE_CAST, STATUS_CONFIRMED, STATUS_CLEARED, REPORT_EXPIRED
+  reportId   String?
+  deviceId   String?
+  edgeId     String?
+  payloadJson String
+  createdAt  DateTime @default(now())
+}
+
+model RoadNode {
+  id         String   @id
+  name       String
+  lat        Float
+  lng        Float
+  elevationM Float    @default(0.0)
+  isHub      Boolean  @default(false)
+  district   String   @default("East Khasi Hills")
+  createdAt  DateTime @default(now())
+}
+
+model RoadSegment {
+  id                String   @id
+  osmWayId          String?
+  name              String
+  ref               String?
+  fromNodeId        String
+  toNodeId          String
+  distanceKm        Float
+  lengthM           Float?
+  baseTravelTimeMin Float
+  speedLimitKmh     Float?
+  roadClass         String   @default("secondary")
+  widthM            Float    @default(6.0)
+  maxWeightKg       Float    @default(30000.0)
+  maxClearanceM     Float    @default(4.2)
+  isBridge          Boolean  @default(false)
+  isTunnel          Boolean  @default(false)
+  surface           String?
+  smoothness        String?
+  oneway            Boolean  @default(false)
+  status            String   @default("open") // open, caution, blocked, closed
+  rainfallNorm      Float    @default(0.0)
+  slopeNorm         Float    @default(0.0)
+  landslideRisk     Float    @default(0.0)
+  surfaceDamage     Float    @default(0.0)
+  waterloggingNorm  Float    @default(0.0)
+  narrownessNorm    Float    @default(0.0)
+  coordinatesJson   String   @default("[]")
+  lastUpdated       DateTime @default(now())
+}
+
+model VehicleProfile {
+  id                   String   @id // bike, car, suv, truck, ambulance
+  name                 String
+  type                 String
+  maxWeightKg          Float
+  maxWidthM            Float
+  minClearanceM        Float
+  minSafetyScore       Float    @default(0.50)
+  sensitivityRainfall  Float    @default(1.0)
+  sensitivitySlope     Float    @default(1.0)
+  sensitivityLandslide Float    @default(1.0)
+  sensitivitySurface   Float    @default(1.0)
+  description          String?
+  updatedAt            DateTime @default(now())
+}
+
+model RouteRequest {
+  id                  String       @id @default(uuid())
+  requestId           String       @unique
+  deviceId            String?
+  sourceNodeId        String
+  destNodeId          String
+  vehicleProfileId    String
+  urgencyProfile      String       @default("safest") // safest or fastest
+  incidentContextJson String       @default("{}")
+  createdAt           DateTime     @default(now())
+  result              RouteResult?
+}
+
+model RouteResult {
+  id                     String       @id @default(uuid())
+  routeRequestId         String       @unique
+  routeRequest           RouteRequest @relation(fields: [routeRequestId], references: [id], onDelete: Cascade)
+  status                 String       // FEASIBLE, NO_FEASIBLE_ROUTE, DEGRADED
+  confidenceScore        Float        @default(0.0)
+  rationale              String
+  constraintsAppliedJson String       @default("[]")
+  dataQualityJson        String       @default("{}")
+  createdAt              DateTime     @default(now())
+  paths                  RoutePath[]
+}
+
+model RoutePath {
+  id                    String      @id @default(uuid())
+  routeResultId         String
+  routeResult           RouteResult @relation(fields: [routeResultId], references: [id], onDelete: Cascade)
+  rank                  Int
+  totalCost             Float
+  estimatedTravelMinutes Float
+  compositeSafetyScore  Float
+  nodesJson             String
+  edgesJson             String
+  bottleneckJson        String?
+  coordinatesJson       String      @default("[]")
+}

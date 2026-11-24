@@ -1,0 +1,170 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "RoadSafe AI Public Driver API",
+    "description": "Public REST API for RoadSafe AI map-first, safe vehicle-aware routing with community hazard reporting and verification.",
+    "version": "2.0.0"
+  },
+  "servers": [
+    {
+      "url": "http://localhost:3000/api/v1",
+      "description": "Local development server"
+    }
+  ],
+  "paths": {
+    "/geocode": {
+      "get": {
+        "summary": "Autocomplete place and landmark search",
+        "parameters": [
+          { "name": "q", "in": "query", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "List of matching places and road nodes" }
+        }
+      }
+    },
+    "/geocode/nearest-node": {
+      "get": {
+        "summary": "Snap coordinates to nearest road node",
+        "parameters": [
+          { "name": "lat", "in": "query", "required": true, "schema": { "type": "number" } },
+          { "name": "lng", "in": "query", "required": true, "schema": { "type": "number" } }
+        ],
+        "responses": {
+          "200": { "description": "Nearest road node" }
+        }
+      }
+    },
+    "/routes": {
+      "post": {
+        "summary": "Plan safest vehicle route",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "origin": { "type": "object" },
+                  "destination": { "type": "object" },
+                  "vehicle": { "type": "string", "enum": ["bike", "car", "suv", "truck", "ambulance"] },
+                  "objective": { "type": "string", "enum": ["safest", "fastest"], "default": "safest" },
+                  "k": { "type": "integer", "default": 3 }
+                },
+                "required": ["origin", "destination"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Ranked alternative routes with safety ratings and rationale" }
+        }
+      }
+    },
+    "/hazards": {
+      "get": {
+        "summary": "List active community hazards in view",
+        "parameters": [
+          { "name": "minLat", "in": "query", "schema": { "type": "number" } },
+          { "name": "minLng", "in": "query", "schema": { "type": "number" } },
+          { "name": "maxLat", "in": "query", "schema": { "type": "number" } },
+          { "name": "maxLng", "in": "query", "schema": { "type": "number" } }
+        ],
+        "responses": {
+          "200": { "description": "Active community hazards with decay factors" }
+        }
+      },
+      "post": {
+        "summary": "2-tap hazard reporting",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "type": { "type": "string", "enum": ["landslide", "flooded_road", "fallen_tree", "damaged_road", "bridge_damaged", "road_blocked", "fog", "other"] },
+                  "severity": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+                  "latitude": { "type": "number" },
+                  "longitude": { "type": "number" },
+                  "note": { "type": "string" },
+                  "photo_url": { "type": "string" }
+                },
+                "required": ["type", "latitude", "longitude"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": { "description": "Hazard report created and snapped to nearest road edge" },
+          "429": { "description": "Device hourly rate limit exceeded" }
+        }
+      }
+    },
+    "/hazards/{id}/vote": {
+      "post": {
+        "summary": "Vote to confirm or clear a reported hazard",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "vote": { "type": "string", "enum": ["yes", "no", "cleared"] },
+                  "voter_latitude": { "type": "number" },
+                  "voter_longitude": { "type": "number" }
+                },
+                "required": ["vote"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Vote counted and status updated if threshold reached" },
+          "403": { "description": "Proximity check failed (device > 5 km from hazard)" },
+          "409": { "description": "Device already voted on this hazard" }
+        }
+      }
+    },
+    "/conditions": {
+      "get": {
+        "summary": "Live weather from Open-Meteo and official alerts",
+        "parameters": [
+          { "name": "lat", "in": "query", "schema": { "type": "number" } },
+          { "name": "lng", "in": "query", "schema": { "type": "number" } }
+        ],
+        "responses": {
+          "200": { "description": "Live weather and official alerts" }
+        }
+      }
+    },
+    "/vehicles": {
+      "get": {
+        "summary": "Supported vehicle profiles",
+        "responses": {
+          "200": { "description": "List of vehicle profiles" }
+        }
+      }
+    },
+    "/roads/geojson": {
+      "get": {
+        "summary": "GeoJSON road network with passability risk bands",
+        "responses": {
+          "200": { "description": "GeoJSON FeatureCollection" }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "summary": "Service and dependency health check",
+        "responses": {
+          "200": { "description": "Healthy status of Node API, PostgreSQL, and Python routing engine" }
+        }
+      }
+    }
+  }
+}
