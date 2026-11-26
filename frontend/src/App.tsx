@@ -19,16 +19,12 @@ import {
 } from './types';
 
 export const App: React.FC = () => {
-  // Navigation State
+  // Navigation State — starts empty until user searches, taps map, or uses GPS
   const [origin, setOrigin] = useState<{ name: string; nodeId?: string; lat?: number; lng?: number }>({
-    name: 'Shillong (Police Bazar)',
-    lat: 25.5788,
-    lng: 91.8933,
+    name: '',
   });
   const [destination, setDestination] = useState<{ name: string; nodeId?: string; lat?: number; lng?: number }>({
-    name: 'Cherrapunji (Sohra)',
-    lat: 25.2815,
-    lng: 91.7166,
+    name: '',
   });
 
   const [vehicle, setVehicle] = useState<string>(() => {
@@ -92,23 +88,52 @@ export const App: React.FC = () => {
   const [mapCenter, setMapCenter] = useState<[number, number]>([25.40, 91.85]);
   const [mapZoom, setMapZoom] = useState<number>(10);
 
+  // Off-route rerouting handler: keeps old route visible until new one arrives
+  const handleOffRouteReroute = useCallback(
+    async (rerouteOrigin: { lat: number; lng: number }): Promise<RouteAlternative | null> => {
+      try {
+        const res = await api.planRoute({
+          origin: { lat: rerouteOrigin.lat, lng: rerouteOrigin.lng },
+          destination:
+            destination.lat !== undefined && destination.lng !== undefined
+              ? { lat: destination.lat, lng: destination.lng }
+              : { nodeId: destination.nodeId },
+          vehicle,
+          objective,
+          k: 3,
+        });
+        if (res.status !== 'NO_FEASIBLE_ROUTE' && res.routes?.length) {
+          setRouteResult(res);
+          setSelectedRouteRank(1);
+          return res.routes[0];
+        }
+      } catch (err) {
+        console.warn('Off-route reroute failed:', err);
+      }
+      return null;
+    },
+    [destination, vehicle, objective]
+  );
+
   // Turn-by-Turn GPS Driving Engine
   const {
     drivingState,
     startNavigation,
     stopNavigation,
+    pauseNavigation,
+    resumeNavigation,
     toggleMute,
-    toggleSimulation,
+    toggleDemoDrive,
     setSimulationMultiplier,
     toggleFollowCamera,
-  } = useDrivingNavigation();
+    retryGps,
+  } = useDrivingNavigation(handleOffRouteReroute);
 
   const handleStartNavigation = () => {
     const activeRoute = routeResult?.routes?.find((r) => r.rank === selectedRouteRank) || routeResult?.routes?.[0];
     if (activeRoute) {
-      // If user has active GPS coordinates, start in Live GPS Driving mode; otherwise demo simulation
-      const hasLiveGps = locationState.coords !== null;
-      startNavigation(activeRoute, hazards, !hasLiveGps);
+      // Always start in real GPS mode (demo drive is an explicit dev-only toggle inside HUD)
+      startNavigation(activeRoute, hazards, false);
     }
   };
 
@@ -120,9 +145,7 @@ export const App: React.FC = () => {
     }
   };
 
-  const initialRouteComputed = useRef(false);
-
-  // Plan Route calculation
+  // Plan Route calculation (only runs when both origin and destination have real coordinates/nodes)
   const triggerRoutePlan = useCallback(
     async (
       from = origin,
@@ -130,7 +153,10 @@ export const App: React.FC = () => {
       v = vehicle,
       obj = objective
     ) => {
-      if (!to.name) return;
+      const hasOrigin = (from.lat !== undefined && from.lng !== undefined) || Boolean(from.nodeId);
+      const hasDest = (to.lat !== undefined && to.lng !== undefined) || Boolean(to.nodeId);
+      if (!hasOrigin || !hasDest) return;
+
       setIsLoadingRoutes(true);
       setRouteError(null);
       try {
@@ -182,16 +208,10 @@ export const App: React.FC = () => {
       if (nodesData?.data) setNodes(nodesData.data);
       if (hazardsData?.hazards) setHazards(hazardsData.hazards);
       if (conditionsData) setConditions(conditionsData);
-
-      // Auto-compute route on first load so user immediately sees route on map
-      if (!initialRouteComputed.current) {
-        initialRouteComputed.current = true;
-        triggerRoutePlan();
-      }
     } catch (err) {
       console.warn('Initial data fetch warning:', err);
     }
-  }, [triggerRoutePlan]);
+  }, []);
 
   useEffect(() => {
     loadData();
@@ -257,11 +277,9 @@ export const App: React.FC = () => {
       },
       (err) => {
         setIsLocating(false);
-        console.warn('GPS location error:', err.message);
-        // Fallback to Shillong HQ
-        const fallback = { name: 'Shillong Command HQ', nodeId: 'N1', lat: 25.5788, lng: 91.8933 };
-        setOrigin(fallback);
-        triggerRoutePlan(fallback, destination, vehicle, objective);
+        setRouteError(
+          `Unable to get GPS location (${err.message}). Please allow location access or search/tap an origin on the map.`
+        );
       },
       { enableHighAccuracy: true, timeout: 8000 }
     );
@@ -311,8 +329,8 @@ export const App: React.FC = () => {
           vehicleSpeedKmh={drivingState.speedKmh}
           showHazards={showHazards}
           showWeather={showWeather}
-          weatherRainMm={conditions?.weather?.currentRainMm || 0}
-          weatherDesc={conditions?.weather?.conditionDescription || 'Clear'}
+          weatherRainMm={conditions?.weather?.currentRainMm ?? 0}
+          weatherDesc={conditions?.weather?.conditionDescription || 'Weather unavailable'}
           center={mapCenter}
           zoom={mapZoom}
         />
@@ -375,7 +393,7 @@ export const App: React.FC = () => {
             }
           }}
           onOpenReport={() => {
-            setReportCoords(userLocation || { lat: 25.40, lng: 91.85 });
+            setReportCoords(userLocation || { lat: mapCenter[0], lng: mapCenter[1] });
             setIsReportModalOpen(true);
           }}
         />
@@ -399,10 +417,13 @@ export const App: React.FC = () => {
         drivingState={drivingState}
         vehicleName={routeResult?.vehicle?.name || 'Car'}
         onStopNavigation={stopNavigation}
+        onPauseNavigation={pauseNavigation}
+        onResumeNavigation={resumeNavigation}
         onToggleMute={toggleMute}
-        onToggleSimulation={toggleSimulation}
+        onToggleDemoDrive={toggleDemoDrive}
         onSetSimulationSpeed={setSimulationMultiplier}
         onRecenterMap={handleRecenterMap}
+        onRetryGps={retryGps}
       />
 
       {/* 6. 2-Tap Report Hazard Modal */}

@@ -13,6 +13,10 @@ model DeviceProfile {
   reliabilityScore Float          @default(1.0) // Weights device votes (0.1 - 2.0)
   reportCount      Int            @default(0)
   voteCount        Int            @default(0)
+  isFlagged        Boolean        @default(false)
+  isShadowBanned   Boolean        @default(false)
+  isBlocked        Boolean        @default(false)
+  rateLimitHits    Int            @default(0)
   lastActiveAt     DateTime       @default(now())
   createdAt        DateTime       @default(now())
   votes            HazardVote[]
@@ -20,23 +24,86 @@ model DeviceProfile {
 }
 
 model HazardReport {
-  id           String        @id @default(uuid())
-  type         String        // landslide, flooded_road, fallen_tree, damaged_road, bridge_damaged, road_blocked, fog_visibility, other
-  severity     String        // low, medium, high, critical
-  edgeId       String?       // Nearest snapped road segment
-  lat          Float
-  lng          Float
-  status       String        @default("unverified") // unverified, confirmed, cleared, expired
-  confirmCount Int           @default(1)
-  clearCount   Int           @default(0)
-  note         String?
-  photoUrl     String?
-  deviceId     String
-  device       DeviceProfile? @relation(fields: [deviceId], references: [deviceId])
-  reportedAt   DateTime      @default(now())
-  expiresAt    DateTime      // Default 6 hours from report time
-  updatedAt    DateTime      @updatedAt
-  votes        HazardVote[]
+  id                 String         @id @default(uuid())
+  type               String         // landslide, flooded_road, fallen_tree, damaged_road, bridge_damaged, road_blocked, fog_visibility, cold_wave, forest_fire, earthquake, other
+  severity           String         // low, medium, high, critical
+  edgeId             String?        // Nearest snapped road segment (when inside local network)
+  lat                Float
+  lng                Float
+  status             String         @default("unverified") // unverified, confirmed, cleared, expired, rejected
+  source             String         @default("community")  // community, admin, ndma_sachet, usgs
+  sourceRecordId     String?        @unique
+  isImported         Boolean        @default(false)
+  stateRegion        String?        // e.g. East Khasi Hills, Rajasthan, Uttarakhand, Himachal Pradesh
+  areaDesc           String?
+  geometryJson       String?        // Optional GeoJSON Polygon/Point for area alerts
+  lastCheckedAt      DateTime?
+  rejectedReason     String?
+  vehicleClassesJson String?        // Optional JSON array of affected vehicle classes
+  confirmCount       Int            @default(1)
+  clearCount         Int            @default(0)
+  note               String?
+  photoUrl           String?
+  deviceId           String
+  device             DeviceProfile? @relation(fields: [deviceId], references: [deviceId])
+  reportedAt         DateTime       @default(now())
+  expiresAt          DateTime       // Default 6 hours from report time
+  updatedAt          DateTime       @updatedAt
+  votes              HazardVote[]
+}
+
+model HazardSourceStatus {
+  id            String   @id // e.g. ndma_rajasthan, ndma_uttarakhand, ndma_himachal, usgs_india
+  providerName  String
+  stateRegion   String
+  status        String   // hazards_reported, no_records, unavailable, stale
+  recordCount   Int      @default(0)
+  lastCheckedAt DateTime @default(now())
+  lastSuccessAt DateTime?
+  errorMessage  String?
+
+  @@map("hazard_source_status")
+}
+
+model AdminUser {
+  id           String    @id @default(uuid())
+  email        String    @unique
+  passwordHash String
+  role         String    @default("moderator") // admin, moderator
+  disabled     Boolean   @default(false)
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+
+  @@map("admin_users")
+}
+
+model AdminAuditLog {
+  id         String   @id @default(uuid())
+  adminId    String
+  adminEmail String
+  action     String
+  targetType String
+  targetId   String?
+  beforeJson String?
+  afterJson  String?
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+
+  @@map("admin_audit_log")
+}
+
+model AppSettings {
+  id                 String   @id @default("global")
+  version            Int      @default(1)
+  confirmThreshold   Int      @default(3)
+  clearThreshold     Int      @default(3)
+  defaultExpiryHours Int      @default(6)
+  proximityRadiusKm  Float    @default(5.0)
+  maxReportsPerHour  Int      @default(10)
+  updatedBy          String?
+  updatedAt          DateTime @updatedAt
+
+  @@map("app_settings")
 }
 
 model HazardVote {
@@ -102,7 +169,10 @@ model RoadSegment {
   waterloggingNorm  Float    @default(0.0)
   narrownessNorm    Float    @default(0.0)
   coordinatesJson   String   @default("[]")
+  geom              Unsupported("geometry(LineString,4326)")?
   lastUpdated       DateTime @default(now())
+
+  @@index([geom], type: Gist, name: "idx_road_segment_geom")
 }
 
 model VehicleProfile {

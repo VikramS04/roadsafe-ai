@@ -13,14 +13,19 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
     const lat = req.query.lat ? parseFloat(req.query.lat as string) : 25.4;
     const lng = req.query.lng ? parseFloat(req.query.lng as string) : 91.8;
 
-    const [weather, alerts] = await Promise.all([
+    const [weather, alertState] = await Promise.all([
       getLiveWeather(lat, lng),
       getActiveOfficialAlerts(),
     ]);
 
     res.json({
       weather,
-      alerts,
+      alerts: alertState.alerts,
+      alertsMeta: {
+        configured: alertState.configured,
+        isStale: alertState.isStale,
+        fetchedAt: alertState.fetchedAt,
+      },
       timestamp: new Date().toISOString(),
     });
   } catch (err: any) {

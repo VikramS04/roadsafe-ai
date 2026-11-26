@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
+from ..graph.builder import build_base_graph
 
 router = APIRouter()
 
@@ -16,13 +17,16 @@ def get_health():
 
 @router.get("/ready")
 def get_readiness():
-    """Readiness probe checking memory graph availability."""
-    from ..graph.builder import SEEDED_NODES, SEEDED_EDGES
+    """Readiness probe reporting actual loaded OSM graph metrics."""
+    try:
+        G = build_base_graph()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
     return {
         "ready": True,
-        "nodes_loaded": len(SEEDED_NODES),
-        "edges_loaded": len(SEEDED_EDGES),
-        "algorithms": ["dijkstra", "yen_k_shortest_paths"],
+        "nodes_loaded": G.number_of_nodes(),
+        "edges_loaded": G.number_of_edges(),
+        "algorithms": ["astar_haversine", "dijkstra", "yen_k_shortest_paths"],
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
-

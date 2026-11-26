@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from ..schemas.requests import RouteComputeRequest
 from ..schemas.responses import (
     RouteComputeResponse,
@@ -24,11 +24,16 @@ def compute_route(req: RouteComputeRequest):
     Computes vehicle-aware emergency routes with hard constraints,
     Yen's K-shortest paths, bottleneck analysis, and fact-grounded rationale.
     """
-    base_graph = build_base_graph()
+    try:
+        base_graph = build_base_graph()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
 
-    # Resolve source and target node IDs
-    src_node = req.source.node_id or "N1"
-    dst_node = req.destination.node_id or "N12"
+    # Resolve source and target node IDs (no hardcoded N1/N12 defaults)
+    if not req.source.node_id or not req.destination.node_id:
+        raise HTTPException(status_code=400, detail="Both source.node_id and destination.node_id are required.")
+    src_node = req.source.node_id
+    dst_node = req.destination.node_id
 
     v_profile = req.vehicle.profile_id or "car"
     excluded_edges = req.incident_context.excluded_segment_ids if req.incident_context else []

@@ -36,7 +36,17 @@ export const RouteBottomSheet: React.FC<RouteBottomSheetProps> = ({
 
   if (!routeResult) return null;
 
-  const { routes = [], status, objective, rationale, constraints_applied = [], vehicle } = routeResult;
+  const {
+    routes = [],
+    status,
+    objective,
+    rationale,
+    constraints_applied = [],
+    vehicle,
+    routing_mode,
+    hazard_coverage,
+    vehicle_limitations,
+  } = routeResult;
   const activeRoute = routes.find((r) => r.rank === selectedRouteRank) || routes[0];
 
   // Voice Speech Guidance ("Tell Me The Route")
@@ -114,7 +124,11 @@ export const RouteBottomSheet: React.FC<RouteBottomSheetProps> = ({
             {routes.length} Route{routes.length > 1 ? 's' : ''} ({vehicle?.name || 'Vehicle'})
           </span>
           <span className="text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded bg-blue-950 text-blue-300 border border-blue-800/50">
-            {objective === 'fastest' ? '⚡ Fastest' : '🛡️ Safest (Default)'}
+            {routing_mode === 'hazard_aware_local'
+              ? objective === 'fastest'
+                ? '⚡ Fastest (Hazard-Aware)'
+                : '🛡️ Hazard-Aware Route'
+              : '🗺️ Ordinary Route — Not Hazard-Verified'}
           </span>
         </div>
 
@@ -158,7 +172,7 @@ export const RouteBottomSheet: React.FC<RouteBottomSheetProps> = ({
             >
               <div className="flex items-center justify-between">
                 <span className="text-[10px] font-bold uppercase tracking-wider">
-                  {route.is_recommended ? '★ Safest' : `Alt ${route.rank}`}
+                  {route.is_recommended ? '★ Lowest Risk' : `Alt ${route.rank}`}
                 </span>
                 <span className="text-[10px]">
                   {route.safety_band === 'Green' ? '🟢' : route.safety_band === 'Yellow' ? '🟡' : '🔴'}
@@ -214,6 +228,22 @@ export const RouteBottomSheet: React.FC<RouteBottomSheetProps> = ({
             </button>
           )}
 
+          {/* Hazard Coverage Warning for Ordinary / Incomplete Coverage Routes */}
+          {hazard_coverage?.warning && (
+            <div className="bg-amber-950/70 border border-amber-600/70 rounded-lg p-2 text-amber-200 text-[11px] font-medium flex items-start gap-1.5">
+              <span>⚠️</span>
+              <span>{hazard_coverage.warning}</span>
+            </div>
+          )}
+
+          {/* Vehicle Limitation Notice (when OSRM doesn't enforce truck/height constraints) */}
+          {vehicle_limitations && (
+            <div className="bg-slate-900 border border-slate-700 rounded-lg p-2 text-slate-300 text-[11px] flex items-start gap-1.5">
+              <span>ℹ️</span>
+              <span>{vehicle_limitations}</span>
+            </div>
+          )}
+
           {/* Weakest Segment Callout */}
           {activeRoute.bottleneck && (
             <div className="bg-amber-950/40 border border-amber-800/40 rounded-lg p-2 text-amber-200 text-xs flex items-start gap-1.5">
@@ -229,6 +259,11 @@ export const RouteBottomSheet: React.FC<RouteBottomSheetProps> = ({
           <div className="text-xs text-slate-300 leading-relaxed">
             <span className="font-semibold text-slate-100">Route Rationale: </span>
             {activeRoute.rationale}
+          </div>
+
+          {/* Safety Metric Disclaimer */}
+          <div className="text-[10px] text-slate-400 bg-slate-900/80 border border-slate-800 rounded-lg px-2.5 py-1.5 leading-snug">
+            Passability S ∈ [0,1] estimates road suitability from OSM attributes, weather, and community reports — not a guarantee of safety. Always obey local signage.
           </div>
 
           {/* Toggle Step-by-Step Corridor Directions */}

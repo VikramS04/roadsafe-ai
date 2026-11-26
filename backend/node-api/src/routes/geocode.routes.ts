@@ -4,78 +4,130 @@ import { PrismaClient } from '@prisma/client';
 const router = Router();
 const prisma = new PrismaClient();
 
-const LOCAL_LANDMARKS = [
-  { name: 'Shillong Command HQ (Police Bazar)', lat: 25.5788, lng: 91.8933, nodeId: 'N1' },
-  { name: 'Upper Shillong Depot', lat: 25.5450, lng: 91.8600, nodeId: 'N2' },
-  { name: 'Mylliem Junction', lat: 25.5140, lng: 91.8540, nodeId: 'N3' },
-  { name: 'Mawphlang Heritage Sacred Grove', lat: 25.4450, lng: 91.7580, nodeId: 'N4' },
-  { name: 'Weiloi Gorge Crossing', lat: 25.3520, lng: 91.6850, nodeId: 'N5' },
-  { name: 'Mawsynram Station', lat: 25.2970, lng: 91.5820, nodeId: 'N6' },
-  { name: 'Cherrapunji (Sohra) Base', lat: 25.2815, lng: 91.7166, nodeId: 'N7' },
-  { name: 'Laitlyngkot Ridge', lat: 25.4370, lng: 91.8340, nodeId: 'N8' },
-  { name: 'Smit Relief Hub', lat: 25.5310, lng: 91.9280, nodeId: 'N9' },
-  { name: 'Pynursla Pass', lat: 25.3050, lng: 91.8940, nodeId: 'N10' },
-  { name: 'Pongtung Village', lat: 25.2500, lng: 91.9500, nodeId: 'N11' },
-  { name: 'Dawki Border Post (Umngot River)', lat: 25.1850, lng: 92.0150, nodeId: 'N12' },
-];
+const GEOCODE_USER_AGENT = process.env.GEOCODE_USER_AGENT || 'RoadSafe-AI-PublicDriverApp/2.0';
+
+function classifyCoverageZone(lat: number, lng: number): 'local_hazard_aware' | 'regional_hazards' | 'global_ordinary' {
+  if (lat >= 25.14 && lat <= 25.66 && lng >= 91.50 && lng <= 92.10) {
+    return 'local_hazard_aware';
+  }
+  // Rajasthan, Uttarakhand, Himachal Pradesh
+  if (
+    (lat >= 23.0 && lat <= 30.2 && lng >= 69.5 && lng <= 78.3) ||
+    (lat >= 28.7 && lat <= 33.3 && lng >= 75.5 && lng <= 81.1)
+  ) {
+    return 'regional_hazards';
+  }
+  return 'global_ordinary';
+}
 
 /**
  * GET /api/v1/geocode?q=...
+ * Global place search via OpenStreetMap Nominatim + supplementary local RoadNode hubs.
  */
 router.get('/', async (req: Request, res: Response): Promise<void> => {
   try {
-    const q = (req.query.q as string || '').trim().toLowerCase();
+    const q = ((req.query.q as string) || '').trim();
     if (!q || q.length < 2) {
-      res.json({ results: [] });
+      res.json({ results: [], source: 'none' });
       return;
     }
 
-    const localMatches = LOCAL_LANDMARKS.filter((l) =>
-      l.name.toLowerCase().includes(q)
-    ).map((l) => ({
-      place_id: `node-${l.nodeId}`,
-      name: l.name,
-      display_name: `${l.name}, Meghalaya, India`,
-      lat: l.lat,
-      lng: l.lng,
-      node_id: l.nodeId,
-      source: 'local_network',
-    }));
+    const dbPromise = prisma.roadNode
+      .findMany({
+        where: {
+          isHub: true,
+          name: { contains: q, mode: 'insensitive' },
+        },
+        take: 4,
+      })
+      .catch(() => []);
 
-    if (localMatches.length > 0) {
-      res.json({ results: localMatches });
-      return;
-    }
+    let nominatimFailed = false;
+    let nominatimError: string | undefined;
 
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 3000);
-      const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&countrycodes=in&viewbox=91.0,26.0,92.5,25.0&bounded=0&limit=5`;
+    const nominatimPromise = (async () => {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 5000);
+        const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=6`;
 
-      const osmRes = await fetch(url, {
-        headers: { 'User-Agent': 'RoadSafe-AI-PublicDriverApp/1.0' },
-        signal: controller.signal,
-      });
-      clearTimeout(timeout);
+        const osmRes = await fetch(url, {
+          headers: { 'User-Agent': GEOCODE_USER_AGENT },
+          signal: controller.signal,
+        });
+        clearTimeout(timeout);
 
-      if (osmRes.ok) {
-        const osmData: any = await osmRes.json();
-        const osmResults = osmData.map((item: any) => ({
-          place_id: `osm-${item.place_id}`,
-          name: item.display_name.split(',')[0],
-          display_name: item.display_name,
-          lat: parseFloat(item.lat),
-          lng: parseFloat(item.lon),
-          source: 'osm',
-        }));
-        res.json({ results: [...localMatches, ...osmResults] });
-        return;
+        if (!osmRes.ok) {
+          nominatimFailed = true;
+          nominatimError =
+            osmRes.status === 429
+              ? 'Geocoder rate limit reached. Please wait a moment and retry.'
+              : `Geocoder returned HTTP ${osmRes.status}`;
+          return [];
+        }
+        return ((await osmRes.json()) as any[]) || [];
+      } catch (err: any) {
+        nominatimFailed = true;
+        nominatimError = err?.name === 'AbortError' ? 'Geocoder request timed out' : 'Geocoder unreachable';
+        return [];
       }
-    } catch {
-      // ignore
+    })();
+
+    const [dbNodes, osmData] = await Promise.all([dbPromise, nominatimPromise]);
+
+    const results: Array<{
+      place_id: string;
+      name: string;
+      display_name: string;
+      lat: number;
+      lng: number;
+      node_id?: string;
+      in_coverage: boolean;
+      coverage_zone: 'local_hazard_aware' | 'regional_hazards' | 'global_ordinary';
+      source: string;
+    }> = [];
+
+    for (const item of osmData) {
+      const lat = parseFloat(item.lat);
+      const lng = parseFloat(item.lon);
+      const zone = classifyCoverageZone(lat, lng);
+      results.push({
+        place_id: `osm-${item.place_id}`,
+        name: String(item.display_name || '').split(',')[0] || q,
+        display_name: item.display_name,
+        lat,
+        lng,
+        in_coverage: zone === 'local_hazard_aware',
+        coverage_zone: zone,
+        source: 'osm_nominatim',
+      });
     }
 
-    res.json({ results: localMatches });
+    for (const n of dbNodes) {
+      const dup = results.some(
+        (r) => Math.abs(r.lat - n.lat) < 0.003 && Math.abs(r.lng - n.lng) < 0.003
+      );
+      if (!dup) {
+        const zone = classifyCoverageZone(n.lat, n.lng);
+        results.unshift({
+          place_id: `db-node-${n.id}`,
+          name: n.name,
+          display_name: `${n.name}, ${n.district}`,
+          lat: n.lat,
+          lng: n.lng,
+          node_id: n.id,
+          in_coverage: zone === 'local_hazard_aware',
+          coverage_zone: zone,
+          source: 'road_network_db',
+        });
+      }
+    }
+
+    res.json({
+      results,
+      degraded: nominatimFailed,
+      ...(nominatimError ? { error: nominatimError } : {}),
+    });
   } catch (err: any) {
     res.status(500).json({ error: 'GEOCODE_ERROR', message: err.message });
   }
@@ -94,13 +146,17 @@ router.get('/nearest-node', async (req: Request, res: Response): Promise<void> =
       return;
     }
 
-    const rows: any[] = await prisma.$queryRawUnsafe(`
+    const rows: any[] = await prisma.$queryRawUnsafe(
+      `
       SELECT id, name, lat, lng, "elevationM", "isHub",
              round(ST_Distance(ST_SetSRID(ST_MakePoint(lng, lat), 4326)::geography, ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography)::numeric, 1) as "distanceMeters"
       FROM "RoadNode"
       ORDER BY ST_SetSRID(ST_MakePoint(lng, lat), 4326) <-> ST_SetSRID(ST_MakePoint($1, $2), 4326)
       LIMIT 1;
-    `, lng, lat);
+    `,
+      lng,
+      lat
+    );
 
     if (rows && rows.length > 0) {
       res.json({

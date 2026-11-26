@@ -6,21 +6,25 @@ interface CachedWeather {
 export interface WeatherConditions {
   latitude: number;
   longitude: number;
-  currentPrecipitationMm: number;
-  currentRainMm: number;
-  weatherCode: number;
+  currentPrecipitationMm: number | null;
+  currentRainMm: number | null;
+  weatherCode: number | null;
   conditionDescription: string;
+  source: 'open-meteo' | 'unavailable';
   isStale: boolean;
-  fetchedAt: string;
+  unavailable: boolean;
+  fetchedAt: string | null;
+  error?: string;
 }
 
 const weatherCache = new Map<string, CachedWeather>();
 const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
 /**
- * Fetch live weather from Open-Meteo (free, no API key required)
- * Caches responses per rounded lat/lng grid cell (~0.1 deg ~11km) for 30 minutes.
- * Fallback to safe defaults on network error with isStale: true.
+ * Fetch live weather from Open-Meteo (free, no API key required).
+ * Caches responses per rounded lat/lng grid cell (~0.1 deg) for 30 minutes.
+ * Never fabricates weather or timestamps on failure: serves stale cache if available,
+ * otherwise returns unavailable: true with fetchedAt: null.
  */
 export async function getLiveWeather(lat: number = 25.4, lng: number = 91.8): Promise<WeatherConditions> {
   const roundedLat = Math.round(lat * 10) / 10;
@@ -50,9 +54,9 @@ export async function getLiveWeather(lat: number = 25.4, lng: number = 91.8): Pr
     const json: any = await res.json();
     const current = json.current || {};
 
-    const precipitation = current.precipitation || 0.0;
-    const rain = current.rain || 0.0;
-    const code = current.weather_code || 0;
+    const precipitation = typeof current.precipitation === 'number' ? current.precipitation : 0.0;
+    const rain = typeof current.rain === 'number' ? current.rain : 0.0;
+    const code = typeof current.weather_code === 'number' ? current.weather_code : 0;
 
     let desc = 'Clear';
     if (code >= 80) desc = 'Rain Showers';
@@ -68,28 +72,37 @@ export async function getLiveWeather(lat: number = 25.4, lng: number = 91.8): Pr
       currentRainMm: rain,
       weatherCode: code,
       conditionDescription: desc,
+      source: 'open-meteo',
       isStale: false,
+      unavailable: false,
       fetchedAt: new Date().toISOString(),
     };
 
     weatherCache.set(cacheKey, { timestamp: now, data: result });
     return result;
-  } catch (error) {
-    console.warn(`Weather fetch failed for ${cacheKey}, serving cached or default conditions:`, error);
+  } catch (error: any) {
+    console.warn(`Weather fetch failed for ${cacheKey}:`, error?.message || error);
     if (cached) {
-      return { ...cached.data, isStale: true };
+      return {
+        ...cached.data,
+        isStale: true,
+        unavailable: false,
+        error: 'Live weather refresh failed; showing last known cached observation.',
+      };
     }
 
-    // Default safe baseline for Meghalaya region
     return {
       latitude: roundedLat,
       longitude: roundedLng,
-      currentPrecipitationMm: 0.0,
-      currentRainMm: 0.0,
-      weatherCode: 0,
-      conditionDescription: 'Normal (Offline Cache)',
+      currentPrecipitationMm: null,
+      currentRainMm: null,
+      weatherCode: null,
+      conditionDescription: 'Weather data unavailable',
+      source: 'unavailable',
       isStale: true,
-      fetchedAt: new Date().toISOString(),
+      unavailable: true,
+      fetchedAt: null,
+      error: 'Unable to reach Open-Meteo weather provider.',
     };
   }
 }

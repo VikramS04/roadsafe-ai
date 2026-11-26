@@ -65,14 +65,22 @@ export const LayerControls: React.FC<LayerControlsProps> = ({
         {/* Weather / Rain Layer Toggle */}
         <button
           onClick={onToggleWeather}
-          title={weather ? `${weather.conditionDescription} (${weather.currentRainMm}mm rain)` : 'Toggle Weather Layer'}
+          title={
+            weather
+              ? weather.unavailable
+                ? 'Weather data unavailable'
+                : `${weather.conditionDescription} (${weather.currentRainMm ?? 0}mm rain) • ${weather.source || 'Open-Meteo'}${weather.fetchedAt ? ` @ ${new Date(weather.fetchedAt).toLocaleTimeString()}` : ''}${weather.isStale ? ' (Stale)' : ''}`
+              : 'Toggle Weather Layer'
+          }
           className={`w-10 h-10 rounded-xl flex items-center justify-center text-base transition border ${
             showWeather
-              ? 'bg-blue-600/30 border-blue-500 text-blue-300 shadow-[0_0_8px_rgba(37,99,235,0.3)]'
+              ? weather?.unavailable
+                ? 'bg-slate-800/80 border-slate-600 text-slate-400'
+                : 'bg-blue-600/30 border-blue-500 text-blue-300 shadow-[0_0_8px_rgba(37,99,235,0.3)]'
               : 'bg-slate-800/60 border-slate-700/60 text-slate-400 hover:text-slate-200'
           }`}
         >
-          🌧️
+          {weather?.unavailable ? '☁️' : '🌧️'}
         </button>
 
         {/* Center Location (Google Maps style Follow Me) */}

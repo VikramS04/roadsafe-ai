@@ -18,23 +18,23 @@ export const HazardConfirmationCard: React.FC<HazardConfirmationCardProps> = ({
   const [isVoting, setIsVoting] = useState(false);
   const [votedMessage, setVotedMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [useNearbySim, setUseNearbySim] = useState(true);
 
   if (!hazard) return null;
 
   const handleVote = async (vote: 'yes' | 'no' | 'cleared') => {
+    if (!userLocation) {
+      setError('Live GPS location is required to verify you are within 5 km of this hazard.');
+      return;
+    }
+
     setIsVoting(true);
     setError(null);
-
-    // If using nearby simulation or if userLocation is missing, vote from hazard proximity (~100m offset)
-    const voterLat = useNearbySim || !userLocation ? hazard.lat + 0.001 : userLocation.lat;
-    const voterLng = useNearbySim || !userLocation ? hazard.lng + 0.001 : userLocation.lng;
 
     try {
       const res = await api.voteHazard(hazard.id, {
         vote,
-        voter_latitude: voterLat,
-        voter_longitude: voterLng,
+        voter_latitude: userLocation.lat,
+        voter_longitude: userLocation.lng,
       });
 
       if (res.statusChanged) {
@@ -77,7 +77,9 @@ export const HazardConfirmationCard: React.FC<HazardConfirmationCardProps> = ({
               </span>
             </div>
             <p className="text-[11px] text-slate-400">
-              Reported {timeAgoMin} min ago {hazard.edgeId ? `on corridor ${hazard.edgeId}` : ''}
+              {hazard.isImported
+                ? `Official feed (${hazard.source?.toUpperCase()}) • ${hazard.areaDesc || hazard.stateRegion || ''}`
+                : `Reported ${timeAgoMin} min ago ${hazard.edgeId ? `on corridor ${hazard.edgeId}` : ''}`}
             </p>
           </div>
         </div>
@@ -99,19 +101,13 @@ export const HazardConfirmationCard: React.FC<HazardConfirmationCardProps> = ({
           Is this hazard still blocking the road?
         </span>
         <span className="text-[11px] text-amber-300/80">
-          3 "Yes" votes confirm it (reroutes traffic). 3 "Cleared" votes clear it.
+          Votes require GPS verification within 5 km of the hazard.
         </span>
-
-        {/* Local proximity simulator toggle for testing */}
-        <label className="flex items-center gap-1.5 mt-1 text-[11px] text-slate-300 cursor-pointer pt-1 border-t border-amber-900/40">
-          <input
-            type="checkbox"
-            checked={useNearbySim}
-            onChange={(e) => setUseNearbySim(e.target.checked)}
-            className="rounded text-blue-600 focus:ring-0"
-          />
-          <span>Nearby Local Driver Mode (Passes 5km check)</span>
-        </label>
+        {!userLocation && (
+          <span className="text-[11px] text-rose-300 font-semibold mt-0.5">
+            GPS location unavailable — enable location to vote.
+          </span>
+        )}
       </div>
 
       {votedMessage && (
@@ -131,7 +127,7 @@ export const HazardConfirmationCard: React.FC<HazardConfirmationCardProps> = ({
         <div className="grid grid-cols-3 gap-1.5 pt-1">
           <button
             onClick={() => handleVote('yes')}
-            disabled={isVoting}
+            disabled={isVoting || !userLocation}
             className="py-2.5 px-2 rounded-xl bg-rose-700 hover:bg-rose-600 text-white text-xs font-bold transition flex flex-col items-center justify-center gap-0.5 active:scale-95 disabled:opacity-50 shadow"
           >
             <span>👍 Still There</span>
@@ -140,7 +136,7 @@ export const HazardConfirmationCard: React.FC<HazardConfirmationCardProps> = ({
 
           <button
             onClick={() => handleVote('no')}
-            disabled={isVoting}
+            disabled={isVoting || !userLocation}
             className="py-2.5 px-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold transition flex flex-col items-center justify-center gap-0.5 active:scale-95 disabled:opacity-50 border border-slate-700"
           >
             <span>👎 Not There</span>
@@ -149,7 +145,7 @@ export const HazardConfirmationCard: React.FC<HazardConfirmationCardProps> = ({
 
           <button
             onClick={() => handleVote('cleared')}
-            disabled={isVoting}
+            disabled={isVoting || !userLocation}
             className="py-2.5 px-2 rounded-xl bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-bold transition flex flex-col items-center justify-center gap-0.5 active:scale-95 disabled:opacity-50 shadow"
           >
             <span>🟢 Cleared</span>

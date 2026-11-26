@@ -1,3 +1,5 @@
+import os
+os.environ["ROADSAFE_ALLOW_TEST_FIXTURE"] = "1"
 import pytest
 from fastapi.testclient import TestClient
 from app.main import app

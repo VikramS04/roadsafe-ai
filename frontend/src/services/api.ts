@@ -45,8 +45,8 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
 
 export const api = {
   // Geocoding & Places
-  async geocode(query: string): Promise<{ results: GeocodeResult[] }> {
-    return request(`/geocode?q=${encodeURIComponent(query)}`);
+  async geocode(query: string, signal?: AbortSignal): Promise<{ results: GeocodeResult[] }> {
+    return request(`/geocode?q=${encodeURIComponent(query)}`, { signal });
   },
 
   async getNearestNode(lat: number, lng: number): Promise<{ node: RoadNode; distanceDegrees: number }> {

@@ -165,6 +165,43 @@
           "200": { "description": "Healthy status of Node API, PostgreSQL, and Python routing engine" }
         }
       }
+    },
+    "/admin/auth/login": {
+      "post": {
+        "summary": "Admin/Moderator login (sets httpOnly JWT cookie + CSRF cookie)",
+        "responses": { "200": { "description": "Authenticated admin profile & CSRF token" }, "429": { "description": "Rate limited / locked out" } }
+      }
+    },
+    "/admin/hazards": {
+      "get": { "summary": "Admin hazard queue with filters, sorting, pagination & status counts" },
+      "post": { "summary": "Create confirmed official hazard snapped to nearest road edge" }
+    },
+    "/admin/hazards/{id}": {
+      "get": { "summary": "Hazard detail with votes, distance, reporter reliability & lifecycle events" },
+      "patch": { "summary": "Confirm, reject, clear, expire, extend, delete photo, or edit & re-snap hazard" },
+      "delete": { "summary": "Delete spam hazard report" }
+    },
+    "/admin/hazards/bulk": {
+      "post": { "summary": "Bulk confirm, reject, clear, expire, or delete hazard reports" }
+    },
+    "/admin/devices": {
+      "get": { "summary": "List device profiles with reliability scores and rate-limit hits" }
+    },
+    "/admin/devices/{deviceId}": {
+      "patch": { "summary": "Flag, shadow-ban, block, or unban a device" }
+    },
+    "/admin/settings": {
+      "get": { "summary": "Get moderation thresholds & rate limits (admin role only)" },
+      "put": { "summary": "Update versioned moderation settings (admin role only)" }
+    },
+    "/admin/dashboard": {
+      "get": { "summary": "Dashboard summary metrics, top hazard roads & recent feed" }
+    },
+    "/admin/audit": {
+      "get": { "summary": "Paginated append-only admin audit log" }
+    },
+    "/admin/export": {
+      "get": { "summary": "Export filtered hazard reports as CSV or GeoJSON" }
     }
   }
 }

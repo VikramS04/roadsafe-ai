@@ -67,18 +67,11 @@ export async function snapToNearestRoadEdge(lat: number, lng: number): Promise<S
       };
     }
   } catch (err) {
-    console.warn('PostGIS spatial snap fallback:', err);
+    console.error('PostGIS spatial snap failed:', err);
+    throw new Error('Spatial road snapping unavailable. Please try again later.');
   }
 
-  return {
-    edgeId: 'OSM-E1',
-    fromNodeId: '1365141138',
-    toNodeId: '1365141186',
-    name: 'NH6',
-    distanceMeters: 0,
-    snapLng: lng,
-    snapLat: lat,
-  };
+  throw new Error('No drivable road segment found near the selected coordinates.');
 }
 
 export interface CreateReportInput {
@@ -92,13 +85,67 @@ export interface CreateReportInput {
   photoUrl?: string;
 }
 
+export async function getAppSettings() {
+  let settings = await prisma.appSettings.findUnique({ where: { id: 'global' } });
+  if (!settings) {
+    settings = await prisma.appSettings.create({
+      data: { id: 'global' },
+    });
+  }
+  return settings;
+}
+
+export async function syncRoadSegmentStatusForEdge(edgeId: string | null | undefined): Promise<void> {
+  if (!edgeId) return;
+  const now = new Date();
+  const activeOnEdge = await prisma.hazardReport.findMany({
+    where: {
+      edgeId,
+      status: 'confirmed',
+      expiresAt: { gt: now },
+      device: { isShadowBanned: false },
+    },
+  });
+
+  const blockingTypes = new Set(['landslide', 'road_blocked', 'bridge_damaged']);
+  let nextStatus = 'open';
+  if (activeOnEdge.some((h) => blockingTypes.has(h.type))) {
+    nextStatus = 'blocked';
+  } else if (activeOnEdge.length > 0) {
+    nextStatus = 'caution';
+  }
+
+  await prisma.roadSegment
+    .updateMany({
+      where: { id: edgeId },
+      data: { status: nextStatus, lastUpdated: now },
+    })
+    .catch(() => {});
+}
+
 /**
  * Create a 2-tap hazard report
  */
 export async function createHazardReport(input: CreateReportInput): Promise<HazardReport> {
-  const edgeId = input.edgeId || (await snapToNearestRoadEdge(input.latitude, input.longitude)).edgeId;
+  const device = await prisma.deviceProfile.findUnique({ where: { deviceId: input.deviceId } });
+  if (device?.isBlocked) {
+    throw new Error('Device is blocked from submitting hazard reports.');
+  }
+
+  const settings = await getAppSettings();
+  let edgeId: string | null = input.edgeId || null;
+  if (!edgeId) {
+    try {
+      const snap = await snapToNearestRoadEdge(input.latitude, input.longitude);
+      if (snap.distanceMeters <= 1000) {
+        edgeId = snap.edgeId;
+      }
+    } catch {
+      edgeId = null;
+    }
+  }
   const now = new Date();
-  const expiresAt = new Date(now.getTime() + 6 * 3600 * 1000); // 6 hours
+  const expiresAt = new Date(now.getTime() + settings.defaultExpiryHours * 3600 * 1000);
 
   const report = await prisma.$transaction(async (tx) => {
     const r = await tx.hazardReport.create({
@@ -174,7 +221,14 @@ export async function voteOnHazardReport(input: VoteHazardInput): Promise<{
     throw new Error('Hazard report not found.');
   }
 
-  // 1. Proximity Check (~5 km) if coordinates are provided
+  const device = await prisma.deviceProfile.findUnique({ where: { deviceId: input.deviceId } });
+  if (device?.isBlocked) {
+    throw new Error('Device is blocked from voting.');
+  }
+
+  const settings = await getAppSettings();
+
+  // 1. Proximity Check (~5 km default, configurable)
   if (input.voterLatitude !== undefined && input.voterLongitude !== undefined) {
     const dist = calculateHaversineDistanceMeters(
       input.voterLatitude,
@@ -182,8 +236,9 @@ export async function voteOnHazardReport(input: VoteHazardInput): Promise<{
       report.lat,
       report.lng
     );
-    if (dist > 5500) {
-      throw new Error(`Proximity validation failed: Device is ${(dist / 1000).toFixed(1)} km away. Votes require being within 5 km of the reported hazard.`);
+    const maxDistM = settings.proximityRadiusKm * 1000 + 500;
+    if (dist > maxDistM) {
+      throw new Error(`Proximity validation failed: Device is ${(dist / 1000).toFixed(1)} km away. Votes require being within ${settings.proximityRadiusKm} km of the reported hazard.`);
     }
   }
 
@@ -217,9 +272,9 @@ export async function voteOnHazardReport(input: VoteHazardInput): Promise<{
       data: incField,
     });
 
-    // Tally thresholds: default N=3
-    const CONFIRM_THRESHOLD = 3;
-    const CLEAR_THRESHOLD = 3;
+    // Tally thresholds from AppSettings (default N=3)
+    const CONFIRM_THRESHOLD = settings.confirmThreshold;
+    const CLEAR_THRESHOLD = settings.clearThreshold;
 
     let targetStatus = updatedReport.status;
 
@@ -267,11 +322,15 @@ export async function voteOnHazardReport(input: VoteHazardInput): Promise<{
     return { report: updatedReport, vote: newVote, statusChanged };
   });
 
+  if (statusChanged) {
+    await syncRoadSegmentStatusForEdge(result.report.edgeId);
+  }
+
   return result;
 }
 
 /**
- * Fetch active hazards (unverified and confirmed, not expired)
+ * Fetch active hazards (unverified and confirmed, not expired, not shadow-banned)
  * Automatically computes time decay factor: [0, 1]
  */
 export async function getActiveHazards(bbox?: { minLat: number; minLng: number; maxLat: number; maxLng: number }) {
@@ -280,6 +339,11 @@ export async function getActiveHazards(bbox?: { minLat: number; minLng: number; 
   const whereClause: any = {
     status: { in: ['unverified', 'confirmed'] },
     expiresAt: { gt: now },
+    OR: [
+      { source: 'admin' },
+      { device: { isShadowBanned: false } },
+      { device: null },
+    ],
   };
 
   if (bbox) {

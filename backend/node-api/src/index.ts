@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import cookieParser from 'cookie-parser';
 import dotenv from 'dotenv';
 import geocodeRoutes from './routes/geocode.routes';
 import routesRoutes from './routes/routes.routes';
@@ -8,6 +9,7 @@ import conditionsRoutes from './routes/conditions.routes';
 import vehicleRoutes from './routes/vehicles.routes';
 import segmentRoutes from './routes/segments.routes';
 import healthRoutes from './routes/health.routes';
+import adminRoutes from './routes/admin.routes';
 
 dotenv.config();
 
@@ -16,6 +18,7 @@ const PORT = process.env.PORT || 3000;
 
 // Security & Parser Middlewares
 app.use(cors({ origin: true, credentials: true }));
+app.use(cookieParser());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -40,6 +43,7 @@ app.use('/api/v1/vehicles', vehicleRoutes);
 app.use('/api/v1/segments', segmentRoutes);
 app.use('/api/v1', segmentRoutes); // mounts /api/v1/roads/geojson and /api/v1/nodes
 app.use('/api/v1/health', healthRoutes);
+app.use('/api/v1/admin', adminRoutes);
 
 // Root information endpoint
 app.get('/', (req, res) => {

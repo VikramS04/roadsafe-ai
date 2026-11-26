@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { MapContainer, TileLayer, Polyline, Marker, Popup, useMap, useMapEvents } from 'react-leaflet';
+import { MapContainer, TileLayer, Polyline, Polygon, Marker, Popup, useMap, useMapEvents } from 'react-leaflet';
 import L from 'leaflet';
 import { RoadGeoJSON, RoadNode, HazardReport, RouteAlternative } from '../types';
 
@@ -235,6 +235,7 @@ export const NetworkMap: React.FC<NetworkMapProps> = ({
   center = [25.40, 91.85],
 }) => {
   const [clickedPoint, setClickedPoint] = useState<{ lat: number; lng: number } | null>(null);
+  const [tileErrorCount, setTileErrorCount] = useState(0);
 
   const getSegmentColor = (props: any) => {
     if (selectedSegmentId === props.id) return '#38BDF8';
@@ -263,6 +264,10 @@ export const NetworkMap: React.FC<NetworkMapProps> = ({
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
           maxZoom={18}
+          eventHandlers={{
+            tileerror: () => setTileErrorCount((c) => c + 1),
+            tileload: () => setTileErrorCount(0),
+          }}
         />
 
         <MapEventsHandler onMapClickAction={handleMapClick} onUserPanAction={onUserPan} />
@@ -447,36 +452,70 @@ export const NetworkMap: React.FC<NetworkMapProps> = ({
             />
           ))}
 
-        {/* 7. Hazard Markers */}
+        {/* 7. Hazard Markers & Imported Alert Area Polygons */}
         {showHazards &&
-          hazards.map((hazard) => (
-            <Marker
-              key={hazard.id}
-              position={[hazard.lat, hazard.lng]}
-              icon={getHazardIcon(hazard.type, hazard.status)}
-              eventHandlers={{
-                click: () => onSelectHazard && onSelectHazard(hazard),
-              }}
-            >
-              <Popup className="custom-popup">
-                <div className="p-1.5 text-slate-900 text-xs flex flex-col gap-1">
-                  <div className="font-bold text-sm capitalize">
-                    {hazard.type.replace('_', ' ')}
-                  </div>
-                  <div className="text-[11px] font-semibold text-rose-700 uppercase">
-                    Status: {hazard.status} ({hazard.confirmCount} confirmations)
-                  </div>
-                  {hazard.note && <div className="italic text-slate-700">"{hazard.note}"</div>}
-                  <button
-                    onClick={() => onSelectHazard && onSelectHazard(hazard)}
-                    className="mt-1 w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-1 px-2 rounded text-[11px] shadow transition"
-                  >
-                    Confirm / Vote on Hazard
-                  </button>
-                </div>
-              </Popup>
-            </Marker>
-          ))}
+          hazards.map((hazard) => {
+            let polyPositions: [number, number][] | null = null;
+            if (hazard.geometryJson) {
+              try {
+                const geo = JSON.parse(hazard.geometryJson);
+                if (geo?.type === 'Polygon' && Array.isArray(geo.coordinates?.[0])) {
+                  polyPositions = geo.coordinates[0].map((c: number[]) => [c[1], c[0]] as [number, number]);
+                }
+              } catch {
+                polyPositions = null;
+              }
+            }
+            const sourceLabel =
+              hazard.source === 'ndma_sachet'
+                ? 'NDMA SACHET'
+                : hazard.source === 'usgs'
+                ? 'USGS Seismic'
+                : hazard.source === 'admin'
+                ? 'Official Admin'
+                : 'Community Report';
+
+            return (
+              <React.Fragment key={hazard.id}>
+                {polyPositions && polyPositions.length >= 3 && (
+                  <Polygon
+                    positions={polyPositions}
+                    pathOptions={{
+                      color: hazard.severity === 'critical' ? '#ef4444' : '#f59e0b',
+                      fillOpacity: 0.14,
+                      weight: 2,
+                      dashArray: '4 4',
+                    }}
+                  />
+                )}
+                <Marker
+                  position={[hazard.lat, hazard.lng]}
+                  icon={getHazardIcon(hazard.type, hazard.status)}
+                  eventHandlers={{
+                    click: () => onSelectHazard && onSelectHazard(hazard),
+                  }}
+                >
+                  <Popup className="custom-popup">
+                    <div className="p-1.5 text-slate-900 text-xs flex flex-col gap-1">
+                      <div className="font-bold text-sm capitalize">
+                        {hazard.type.replace(/_/g, ' ')}
+                      </div>
+                      <div className="text-[10px] font-bold uppercase text-blue-700">
+                        Source: {sourceLabel} {hazard.stateRegion ? `• ${hazard.stateRegion}` : ''}
+                      </div>
+                      <div className="text-[11px] font-semibold text-rose-700 uppercase">
+                        Status: {hazard.status} ({hazard.confirmCount} confirmations)
+                      </div>
+                      <div className="text-[10px] text-slate-500">
+                        Reported: {new Date(hazard.reportedAt).toLocaleString()}
+                      </div>
+                      {hazard.note && <div className="italic text-slate-700">"{hazard.note}"</div>}
+                    </div>
+                  </Popup>
+                </Marker>
+              </React.Fragment>
+            );
+          })}
 
         {/* 8. User Current GPS Location (pulsing dot with optional heading cone) */}
         {userLocation && (
@@ -555,6 +594,13 @@ export const NetworkMap: React.FC<NetworkMapProps> = ({
           </Popup>
         )}
       </MapContainer>
+
+      {/* Non-blocking Tile Loading Warning */}
+      {tileErrorCount >= 4 && (
+        <div className="absolute bottom-3 left-3 z-[1050] bg-amber-950/90 border border-amber-700 text-amber-200 text-[11px] px-3 py-1.5 rounded-lg shadow-lg pointer-events-auto">
+          Map tiles temporarily unavailable or rate-limited; routes and hazard markers remain active.
+        </div>
+      )}
     </div>
   );
 };

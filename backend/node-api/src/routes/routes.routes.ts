@@ -4,6 +4,7 @@ import crypto from 'crypto';
 import { callPythonComputeRoute, PythonRouteRequest } from '../integrations/pythonRouting';
 import { deviceAuth } from '../middleware/deviceAuth';
 import { getActiveHazards, snapToNearestRoadEdge } from '../services/hazard.service';
+import { isInsideLocalGraphCoverage, computeBroadOsrmRoute } from '../services/routingProvider.service';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -71,6 +72,68 @@ router.post('/', deviceAuth, async (req: Request, res: Response): Promise<void> 
       return;
     }
 
+    const normalizedType = vehicleType.toLowerCase().includes('suv') ? 'suv' : vehicleType.toLowerCase();
+    const vehicle = await prisma.vehicleProfile.findFirst({
+      where: { type: normalizedType },
+    });
+
+    if (!vehicle) {
+      res.status(400).json({
+        error: 'INVALID_VEHICLE',
+        message: `Vehicle profile '${vehicleType}' not found. Supported types: bike, car, suv, truck, ambulance.`,
+      });
+      return;
+    }
+
+    const activeHazards = await getActiveHazards();
+
+    // Check if both origin and destination are inside East Khasi Hills local graph coverage
+    const hasCoords =
+      origin.lat !== undefined &&
+      origin.lng !== undefined &&
+      destination.lat !== undefined &&
+      destination.lng !== undefined;
+
+    const useBroadProvider =
+      hasCoords &&
+      (!isInsideLocalGraphCoverage(Number(origin.lat), Number(origin.lng)) ||
+        !isInsideLocalGraphCoverage(Number(destination.lat), Number(destination.lng)));
+
+    if (useBroadProvider) {
+      const requestId = `REQ-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+      try {
+        const broad = await computeBroadOsrmRoute({
+          origin: { lat: Number(origin.lat), lng: Number(origin.lng) },
+          destination: { lat: Number(destination.lat), lng: Number(destination.lng) },
+          vehicleType: vehicle.type,
+          activeHazards,
+          k: Math.min(3, Math.max(1, Number(k) || 3)),
+        });
+
+        res.json({
+          request_id: requestId,
+          status: 'FEASIBLE',
+          objective: objective === 'fastest' ? 'fastest' : 'safest',
+          routing_provider: broad.routing_provider,
+          routing_mode: broad.routing_mode,
+          hazard_coverage: broad.hazard_coverage,
+          vehicle_limitations: broad.vehicle_limitations,
+          vehicle: { id: vehicle.id, name: vehicle.name, type: vehicle.type },
+          routes: broad.routes,
+          constraints_applied: [],
+          confidence_score: 0.65,
+          rationale: broad.rationale,
+        });
+        return;
+      } catch (broadErr: any) {
+        res.status(502).json({
+          error: 'BROAD_ROUTING_UNAVAILABLE',
+          message: broadErr.message || 'Global routing provider failed.',
+        });
+        return;
+      }
+    }
+
     let srcLoc: ResolvedLocation;
     let dstLoc: ResolvedLocation;
     try {
@@ -99,29 +162,17 @@ router.post('/', deviceAuth, async (req: Request, res: Response): Promise<void> 
       return;
     }
 
-    const normalizedType = vehicleType.toLowerCase().includes('suv') ? 'suv' : vehicleType.toLowerCase();
-    const vehicle = await prisma.vehicleProfile.findFirst({
-      where: { type: normalizedType },
-    });
-
-    if (!vehicle) {
-      res.status(400).json({
-        error: 'INVALID_VEHICLE',
-        message: `Vehicle profile '${vehicleType}' not found. Supported types: bike, car, suv, truck, ambulance.`,
-      });
-      return;
-    }
-
-    const activeHazards = await getActiveHazards();
-    const hazardContext = activeHazards.map((h) => ({
-      edge_id: h.edgeId || 'OSM-E1',
-      hazard_type: h.type,
-      severity: h.severity,
-      status: h.status,
-      confirm_count: h.confirmCount,
-      clear_count: h.clearCount,
-      decay_factor: h.decayFactor,
-    }));
+    const hazardContext = activeHazards
+      .filter((h) => Boolean(h.edgeId))
+      .map((h) => ({
+        edge_id: h.edgeId as string,
+        hazard_type: h.type,
+        severity: h.severity,
+        status: h.status,
+        confirm_count: h.confirmCount,
+        clear_count: h.clearCount,
+        decay_factor: h.decayFactor,
+      }));
 
     const requestId = `REQ-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
     const pythonPayload: PythonRouteRequest = {
@@ -201,6 +252,13 @@ router.post('/', deviceAuth, async (req: Request, res: Response): Promise<void> 
       request_id: requestId,
       status: routingResult.status,
       objective: objective === 'fastest' ? 'fastest' : 'safest',
+      routing_provider: 'east_khasi_hills_osm',
+      routing_mode: 'hazard_aware_local',
+      hazard_coverage: {
+        status: 'verified',
+        warning: null,
+      },
+      vehicle_limitations: null,
       vehicle: {
         id: vehicle.id,
         name: vehicle.name,

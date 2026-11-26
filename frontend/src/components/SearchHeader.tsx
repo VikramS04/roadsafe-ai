@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { GeocodeResult } from '../types';
 import { api } from '../services/api';
 
@@ -15,6 +15,12 @@ interface SearchHeaderProps {
   onUseMyLocation: () => void;
   isLocating: boolean;
   onSearchRoute: () => void;
+}
+
+interface FieldState {
+  query: string;
+  suggestions: GeocodeResult[];
+  isOpen: boolean;
 }
 
 const VEHICLES = [
@@ -39,54 +45,112 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
   isLocating,
   onSearchRoute,
 }) => {
-  const [originQuery, setOriginQuery] = useState(currentOriginName);
-  const [destQuery, setDestQuery] = useState(currentDestinationName);
-  const [activeField, setActiveField] = useState<'origin' | 'dest' | null>(null);
+  const [originField, setOriginField] = useState<FieldState>({
+    query: currentOriginName,
+    suggestions: [],
+    isOpen: false,
+  });
 
-  const [originSuggestions, setOriginSuggestions] = useState<GeocodeResult[]>([]);
-  const [destSuggestions, setDestSuggestions] = useState<GeocodeResult[]>([]);
+  const [destField, setDestField] = useState<FieldState>({
+    query: currentDestinationName,
+    suggestions: [],
+    isOpen: false,
+  });
 
-  const searchTimeout = useRef<any>(null);
+  // Independent timers, AbortControllers, and request IDs per field
+  const originTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const destTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const originAbortRef = useRef<AbortController | null>(null);
+  const destAbortRef = useRef<AbortController | null>(null);
+  const originReqIdRef = useRef<number>(0);
+  const destReqIdRef = useRef<number>(0);
+  const containerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    setOriginQuery(currentOriginName);
+    setOriginField({ query: currentOriginName, suggestions: [], isOpen: false });
   }, [currentOriginName]);
 
   useEffect(() => {
-    setDestQuery(currentDestinationName);
+    setDestField({ query: currentDestinationName, suggestions: [], isOpen: false });
   }, [currentDestinationName]);
 
-  const handleSearch = (text: string, field: 'origin' | 'dest') => {
-    if (field === 'origin') setOriginQuery(text);
-    else setDestQuery(text);
+  // Close dropdowns on outside click
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setOriginField((prev) => ({ ...prev, isOpen: false, suggestions: [] }));
+        setDestField((prev) => ({ ...prev, isOpen: false, suggestions: [] }));
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
 
-    if (searchTimeout.current) clearTimeout(searchTimeout.current);
+  // Cleanup timers & in-flight requests on unmount
+  useEffect(() => {
+    return () => {
+      if (originTimeoutRef.current) clearTimeout(originTimeoutRef.current);
+      if (destTimeoutRef.current) clearTimeout(destTimeoutRef.current);
+      originAbortRef.current?.abort();
+      destAbortRef.current?.abort();
+    };
+  }, []);
 
-    if (text.trim().length >= 2) {
-      searchTimeout.current = setTimeout(async () => {
-        try {
-          const res = await api.geocode(text.trim());
-          if (field === 'origin') {
-            setOriginSuggestions(res.results || []);
-          } else {
-            setDestSuggestions(res.results || []);
-          }
-        } catch {
-          if (field === 'origin') setOriginSuggestions([]);
-          else setDestSuggestions([]);
-        }
-      }, 200);
+  const cancelFieldRequests = useCallback((field: 'origin' | 'dest') => {
+    if (field === 'origin') {
+      if (originTimeoutRef.current) clearTimeout(originTimeoutRef.current);
+      originAbortRef.current?.abort();
+      originReqIdRef.current += 1;
     } else {
-      if (field === 'origin') setOriginSuggestions([]);
-      else setDestSuggestions([]);
+      if (destTimeoutRef.current) clearTimeout(destTimeoutRef.current);
+      destAbortRef.current?.abort();
+      destReqIdRef.current += 1;
     }
+  }, []);
+
+  const handleSearch = (text: string, field: 'origin' | 'dest') => {
+    const setField = field === 'origin' ? setOriginField : setDestField;
+    const setOtherField = field === 'origin' ? setDestField : setOriginField;
+    const timeoutRef = field === 'origin' ? originTimeoutRef : destTimeoutRef;
+    const abortRef = field === 'origin' ? originAbortRef : destAbortRef;
+    const reqIdRef = field === 'origin' ? originReqIdRef : destReqIdRef;
+
+    // Close the other field's dropdown immediately
+    setOtherField((prev) => ({ ...prev, isOpen: false }));
+    cancelFieldRequests(field);
+
+    const trimmed = text.trim();
+    if (trimmed.length < 2) {
+      setField({ query: text, suggestions: [], isOpen: false });
+      return;
+    }
+
+    setField((prev) => ({ ...prev, query: text, isOpen: true }));
+    const reqId = reqIdRef.current;
+
+    timeoutRef.current = setTimeout(async () => {
+      const controller = new AbortController();
+      abortRef.current = controller;
+      try {
+        const res = await api.geocode(trimmed, controller.signal);
+        if (controller.signal.aborted || reqId !== reqIdRef.current) return;
+        const results = res.results || [];
+        setField((prev) =>
+          reqId === reqIdRef.current
+            ? { ...prev, suggestions: results, isOpen: results.length > 0 }
+            : prev
+        );
+      } catch (err: any) {
+        if (err?.name === 'AbortError' || reqId !== reqIdRef.current) return;
+        setField((prev) => ({ ...prev, suggestions: [], isOpen: false }));
+      }
+    }, 200);
   };
 
   const selectPlace = (place: GeocodeResult, field: 'origin' | 'dest') => {
+    cancelFieldRequests(field);
     if (field === 'origin') {
-      setOriginQuery(place.name);
-      setOriginSuggestions([]);
-      setActiveField(null);
+      setOriginField({ query: place.name, suggestions: [], isOpen: false });
       onSelectOrigin({
         name: place.name,
         nodeId: place.node_id,
@@ -94,9 +158,7 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
         lng: place.lng,
       });
     } else {
-      setDestQuery(place.name);
-      setDestSuggestions([]);
-      setActiveField(null);
+      setDestField({ query: place.name, suggestions: [], isOpen: false });
       onSelectDestination({
         name: place.name,
         nodeId: place.node_id,
@@ -106,9 +168,20 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
     }
   };
 
+  const closeField = (field: 'origin' | 'dest') => {
+    cancelFieldRequests(field);
+    if (field === 'origin') {
+      setOriginField((prev) => ({ ...prev, isOpen: false, suggestions: [] }));
+    } else {
+      setDestField((prev) => ({ ...prev, isOpen: false, suggestions: [] }));
+    }
+  };
+
   return (
-    <div className="absolute top-3 left-3 right-3 sm:left-4 sm:right-auto sm:w-[460px] z-[1100] flex flex-col gap-2 pointer-events-auto">
-      {/* Search Container Card */}
+    <div
+      ref={containerRef}
+      className="absolute top-3 left-3 right-3 sm:left-4 sm:right-auto sm:w-[460px] z-[1100] flex flex-col gap-2 pointer-events-auto"
+    >
       <div className="bg-slate-900/95 backdrop-blur-md border border-slate-700/80 rounded-2xl shadow-2xl p-3 flex flex-col gap-2.5 transition-all">
         {/* App Title & Quick Badges */}
         <div className="flex items-center justify-between pb-2 border-b border-slate-800">
@@ -119,7 +192,7 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
             <div>
               <span className="font-bold text-slate-100 text-sm tracking-wide">RoadSafe AI</span>
               <span className="ml-1.5 text-[10px] uppercase font-semibold text-emerald-400 bg-emerald-950/60 px-1.5 py-0.5 rounded border border-emerald-800/40">
-                Safe Vehicle Router
+                Global + Regional Hazards
               </span>
             </div>
           </div>
@@ -146,20 +219,25 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
                 <span className="text-emerald-400 font-bold text-sm">🟢</span>
                 <input
                   type="text"
+                  aria-label="Origin location"
                   placeholder="Start location / Origin..."
-                  value={originQuery}
+                  value={originField.query}
                   onChange={(e) => handleSearch(e.target.value, 'origin')}
-                  onFocus={() => {
-                    setActiveField('origin');
-                    if (originQuery.length >= 2) handleSearch(originQuery, 'origin');
+                  onFocus={() => setDestField((prev) => ({ ...prev, isOpen: false, suggestions: [] }))}
+                  onBlur={() => closeField('origin')}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') closeField('origin');
                   }}
                   className="bg-transparent text-xs text-slate-100 placeholder-slate-400 w-full focus:outline-none font-medium"
                 />
-                {originQuery && (
+                {originField.query && (
                   <button
+                    type="button"
+                    aria-label="Clear origin"
+                    onMouseDown={(e) => e.preventDefault()}
                     onClick={() => {
-                      setOriginQuery('');
-                      setOriginSuggestions([]);
+                      cancelFieldRequests('origin');
+                      setOriginField({ query: '', suggestions: [], isOpen: false });
                     }}
                     className="text-slate-400 hover:text-slate-200 text-xs font-bold"
                   >
@@ -168,17 +246,36 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
                 )}
               </div>
 
-              {/* Origin Suggestions Dropdown */}
-              {activeField === 'origin' && originSuggestions.length > 0 && (
-                <div className="absolute top-full left-0 right-0 mt-1 bg-slate-900/98 border border-slate-700 rounded-xl shadow-2xl max-h-48 overflow-y-auto z-50 divide-y divide-slate-800">
-                  {originSuggestions.map((item) => (
+              {originField.isOpen && originField.suggestions.length > 0 && (
+                <div
+                  role="listbox"
+                  aria-label="Origin suggestions"
+                  className="absolute top-full left-0 right-0 mt-1 bg-slate-900/98 border border-slate-700 rounded-xl shadow-2xl max-h-48 overflow-y-auto z-50 divide-y divide-slate-800"
+                >
+                  {originField.suggestions.map((item) => (
                     <div
                       key={`orig-${item.place_id}`}
+                      role="option"
+                      onMouseDown={(e) => e.preventDefault()}
                       onClick={() => selectPlace(item, 'origin')}
                       className="p-2 hover:bg-slate-800 cursor-pointer flex items-center justify-between text-left text-xs transition"
                     >
-                      <span className="font-semibold text-slate-100">{item.name}</span>
-                      <span className="text-[10px] text-slate-500">{item.node_id ? 'Road Node' : 'Place'}</span>
+                      <span className="font-semibold text-slate-100 truncate pr-2">{item.name}</span>
+                      <span
+                        className={`text-[10px] whitespace-nowrap ${
+                          item.coverage_zone === 'local_hazard_aware'
+                            ? 'text-emerald-400'
+                            : item.coverage_zone === 'regional_hazards'
+                            ? 'text-amber-400'
+                            : 'text-slate-400'
+                        }`}
+                      >
+                        {item.coverage_zone === 'local_hazard_aware'
+                          ? 'Local Hazard-Aware'
+                          : item.coverage_zone === 'regional_hazards'
+                          ? 'Regional Hazards'
+                          : 'Ordinary Routing'}
+                      </span>
                     </div>
                   ))}
                 </div>
@@ -191,20 +288,25 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
                 <span className="text-rose-500 font-bold text-sm">🏁</span>
                 <input
                   type="text"
+                  aria-label="Destination location"
                   placeholder="Destination (e.g. Cherrapunji, Dawki)..."
-                  value={destQuery}
+                  value={destField.query}
                   onChange={(e) => handleSearch(e.target.value, 'dest')}
-                  onFocus={() => {
-                    setActiveField('dest');
-                    if (destQuery.length >= 2) handleSearch(destQuery, 'dest');
+                  onFocus={() => setOriginField((prev) => ({ ...prev, isOpen: false, suggestions: [] }))}
+                  onBlur={() => closeField('dest')}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') closeField('dest');
                   }}
                   className="bg-transparent text-xs text-slate-100 placeholder-slate-400 w-full focus:outline-none font-medium"
                 />
-                {destQuery && (
+                {destField.query && (
                   <button
+                    type="button"
+                    aria-label="Clear destination"
+                    onMouseDown={(e) => e.preventDefault()}
                     onClick={() => {
-                      setDestQuery('');
-                      setDestSuggestions([]);
+                      cancelFieldRequests('dest');
+                      setDestField({ query: '', suggestions: [], isOpen: false });
                     }}
                     className="text-slate-400 hover:text-slate-200 text-xs font-bold"
                   >
@@ -213,17 +315,36 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
                 )}
               </div>
 
-              {/* Destination Suggestions Dropdown */}
-              {activeField === 'dest' && destSuggestions.length > 0 && (
-                <div className="absolute top-full left-0 right-0 mt-1 bg-slate-900/98 border border-slate-700 rounded-xl shadow-2xl max-h-48 overflow-y-auto z-50 divide-y divide-slate-800">
-                  {destSuggestions.map((item) => (
+              {destField.isOpen && destField.suggestions.length > 0 && (
+                <div
+                  role="listbox"
+                  aria-label="Destination suggestions"
+                  className="absolute top-full left-0 right-0 mt-1 bg-slate-900/98 border border-slate-700 rounded-xl shadow-2xl max-h-48 overflow-y-auto z-50 divide-y divide-slate-800"
+                >
+                  {destField.suggestions.map((item) => (
                     <div
                       key={`dest-${item.place_id}`}
+                      role="option"
+                      onMouseDown={(e) => e.preventDefault()}
                       onClick={() => selectPlace(item, 'dest')}
                       className="p-2 hover:bg-slate-800 cursor-pointer flex items-center justify-between text-left text-xs transition"
                     >
-                      <span className="font-semibold text-slate-100">{item.name}</span>
-                      <span className="text-[10px] text-slate-500">{item.node_id ? 'Road Node' : 'Place'}</span>
+                      <span className="font-semibold text-slate-100 truncate pr-2">{item.name}</span>
+                      <span
+                        className={`text-[10px] whitespace-nowrap ${
+                          item.coverage_zone === 'local_hazard_aware'
+                            ? 'text-emerald-400'
+                            : item.coverage_zone === 'regional_hazards'
+                            ? 'text-amber-400'
+                            : 'text-slate-400'
+                        }`}
+                      >
+                        {item.coverage_zone === 'local_hazard_aware'
+                          ? 'Local Hazard-Aware'
+                          : item.coverage_zone === 'regional_hazards'
+                          ? 'Regional Hazards'
+                          : 'Ordinary Routing'}
+                      </span>
                     </div>
                   ))}
                 </div>
@@ -231,7 +352,6 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
             </div>
           </div>
 
-          {/* Swap Origin / Destination Button */}
           <button
             onClick={onSwapLocations}
             title="Swap Origin and Destination"
@@ -273,7 +393,6 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
 
         {/* Objective Toggle & Action Button */}
         <div className="pt-1.5 border-t border-slate-800/80 flex items-center justify-between gap-2">
-          {/* Safest vs Fastest Toggle */}
           <div className="flex items-center bg-slate-950/80 p-0.5 rounded-xl border border-slate-800 text-xs">
             <button
               onClick={() => onToggleObjective('safest')}
@@ -297,7 +416,6 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
             </button>
           </div>
 
-          {/* Find Route Button */}
           <button
             onClick={onSearchRoute}
             className="flex-1 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white text-xs font-bold py-2 px-3 rounded-xl shadow-lg transition flex items-center justify-center gap-1.5 active:scale-95"

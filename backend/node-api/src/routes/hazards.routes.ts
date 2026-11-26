@@ -5,16 +5,31 @@ import {
   voteOnHazardReport,
   getActiveHazards,
 } from '../services/hazard.service';
+import { refreshRegionalHazards, getHazardSourceStatuses } from '../services/regionalHazards.service';
 import { deviceAuth, rateLimitReports } from '../middleware/deviceAuth';
 
 const router = Router();
 const prisma = new PrismaClient();
+
+function sanitizePublicHazard(h: any) {
+  const { deviceId, ...rest } = h;
+  return {
+    ...rest,
+    deviceShortId: typeof deviceId === 'string' ? deviceId.slice(0, 10) : 'anonymous',
+  };
+}
 
 /**
  * GET /api/v1/hazards
  */
 router.get('/', async (req: Request, res: Response): Promise<void> => {
   try {
+    // Trigger regional feed refresh with a short 2.5s budget so map/hazards stay responsive
+    await Promise.race([
+      refreshRegionalHazards(false),
+      new Promise((r) => setTimeout(r, 2500)),
+    ]);
+
     const minLat = req.query.minLat ? parseFloat(req.query.minLat as string) : undefined;
     const minLng = req.query.minLng ? parseFloat(req.query.minLng as string) : undefined;
     const maxLat = req.query.maxLat ? parseFloat(req.query.maxLat as string) : undefined;
@@ -25,8 +40,32 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
       bbox = { minLat, minLng, maxLat, maxLng };
     }
 
-    const hazards = await getActiveHazards(bbox);
-    res.json({ hazards, count: hazards.length });
+    const [hazards, sources] = await Promise.all([
+      getActiveHazards(bbox),
+      getHazardSourceStatuses(),
+    ]);
+
+    const hasUnavailable = sources.some((s) => s.status === 'unavailable');
+    const hasStale = sources.some((s) => s.isStale);
+    const overallStatus =
+      hazards.length > 0
+        ? 'hazards_reported'
+        : hasUnavailable
+        ? 'unavailable'
+        : hasStale
+        ? 'stale'
+        : sources.length === 0
+        ? 'incomplete'
+        : 'no_records';
+
+    res.json({
+      hazards: hazards.map(sanitizePublicHazard),
+      count: hazards.length,
+      coverage: {
+        status: overallStatus,
+        sources,
+      },
+    });
   } catch (err: any) {
     res.status(500).json({ error: 'FETCH_HAZARDS_FAILED', message: err.message });
   }
@@ -47,12 +86,12 @@ router.get('/:id', async (req: Request, res: Response): Promise<void> => {
       },
     });
 
-    if (!hazard) {
+    if (!hazard || hazard.status === 'rejected') {
       res.status(404).json({ error: 'NOT_FOUND', message: 'Hazard report not found.' });
       return;
     }
 
-    res.json({ hazard });
+    res.json({ hazard: sanitizePublicHazard(hazard) });
   } catch (err: any) {
     res.status(500).json({ error: 'FETCH_HAZARD_FAILED', message: err.message });
   }

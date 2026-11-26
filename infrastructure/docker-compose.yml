@@ -42,8 +42,12 @@ services:
     environment:
       - PORT=3000
       - DATABASE_URL=postgresql://postgres:postgres@db:5432/roadsafe_ai?schema=public
-      - JWT_SECRET=roadsafe_ai_jwt_super_secret_key_2026_emergency_response
+      - JWT_SECRET=${JWT_SECRET:-change_me_in_production}
+      - ADMIN_JWT_SECRET=${ADMIN_JWT_SECRET:-change_me_admin_secret_in_production}
       - PYTHON_ROUTING_URL=http://routing-engine:8000
+      - GEOCODE_VIEWBOX=${GEOCODE_VIEWBOX:-91.0,26.0,92.5,25.0}
+      - GEOCODE_COUNTRY_CODES=${GEOCODE_COUNTRY_CODES:-in}
+      - OFFICIAL_ALERTS_FEED_URL=${OFFICIAL_ALERTS_FEED_URL:-}
       - NODE_ENV=production
     depends_on:
       db:

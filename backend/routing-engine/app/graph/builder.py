@@ -299,39 +299,40 @@ def load_cached_osm_graph() -> Optional[nx.DiGraph]:
         G.add_edge("3524101800", "9662084265", distance_km=0.024, base_travel_time_min=0.03, weight=0.024, name="Junction Link", road_class="residential", coordinates=[[91.777705, 25.419748], [91.777523, 25.419863]])
         G.add_edge("9662084265", "3524101800", distance_km=0.024, base_travel_time_min=0.03, weight=0.024, name="Junction Link", road_class="residential", coordinates=[[91.777523, 25.419863], [91.777705, 25.419748]])
 
-        # 2. Add seeded nodes and edges so N1..N12 and E1..E17 resolve seamlessly
-        for n in SEEDED_NODES:
-            if n["id"] not in G.nodes:
-                G.add_node(
-                    str(n["id"]),
-                    name=n.get("name", str(n["id"])),
-                    lat=float(n.get("lat", 0.0)),
-                    lng=float(n.get("lng", 0.0)),
-                    elevation_m=float(n.get("elevation_m", 0.0)),
-                    is_hub=bool(n.get("is_hub", False)),
+        # 2. Only inject toy fixture nodes/edges if explicitly enabled for isolated unit tests
+        if os.environ.get("ROADSAFE_ALLOW_TEST_FIXTURE") == "1":
+            for n in SEEDED_NODES:
+                if n["id"] not in G.nodes:
+                    G.add_node(
+                        str(n["id"]),
+                        name=n.get("name", str(n["id"])),
+                        lat=float(n.get("lat", 0.0)),
+                        lng=float(n.get("lng", 0.0)),
+                        elevation_m=float(n.get("elevation_m", 0.0)),
+                        is_hub=bool(n.get("is_hub", False)),
+                    )
+            for e in SEEDED_EDGES:
+                u, v = str(e["from"]), str(e["to"])
+                G.add_edge(
+                    u, v,
+                    edge_id=e.get("id"),
+                    name=e.get("name", e.get("id")),
+                    distance_km=float(e.get("distance_km", 5.0)),
+                    base_travel_time_min=float(e.get("travel_time_min", 10.0)),
+                    road_class=e.get("road_class", "secondary"),
+                    width_m=float(e.get("width_m", 6.0)),
+                    max_weight_kg=float(e.get("max_weight_kg", 30000.0)),
+                    max_clearance_m=float(e.get("max_clearance_m", 4.2)),
+                    is_bridge=bool(e.get("is_bridge", False)),
+                    is_tunnel=bool(e.get("is_tunnel", False)),
+                    status=e.get("status", "open"),
+                    rainfall_norm=float(e.get("rainfall_norm", 0.0)),
+                    slope_norm=float(e.get("slope_norm", 0.0)),
+                    landslide_risk=float(e.get("landslide_risk", 0.0)),
+                    surface_damage=float(e.get("surface_damage", 0.0)),
+                    narrowness_norm=float(e.get("narrowness_norm", 0.0)),
+                    coordinates=e.get("coordinates", []),
                 )
-        for e in SEEDED_EDGES:
-            u, v = str(e["from"]), str(e["to"])
-            G.add_edge(
-                u, v,
-                edge_id=e.get("id"),
-                name=e.get("name", e.get("id")),
-                distance_km=float(e.get("distance_km", 5.0)),
-                base_travel_time_min=float(e.get("travel_time_min", 10.0)),
-                road_class=e.get("road_class", "secondary"),
-                width_m=float(e.get("width_m", 6.0)),
-                max_weight_kg=float(e.get("max_weight_kg", 30000.0)),
-                max_clearance_m=float(e.get("max_clearance_m", 4.2)),
-                is_bridge=bool(e.get("is_bridge", False)),
-                is_tunnel=bool(e.get("is_tunnel", False)),
-                status=e.get("status", "open"),
-                rainfall_norm=float(e.get("rainfall_norm", 0.0)),
-                slope_norm=float(e.get("slope_norm", 0.0)),
-                landslide_risk=float(e.get("landslide_risk", 0.0)),
-                surface_damage=float(e.get("surface_damage", 0.0)),
-                narrowness_norm=float(e.get("narrowness_norm", 0.0)),
-                coordinates=e.get("coordinates", []),
-            )
 
         _CACHED_BASE_GRAPH = G
         return _CACHED_BASE_GRAPH
@@ -344,12 +345,15 @@ def build_base_graph(
     custom_edges: Optional[List[Dict[str, Any]]] = None,
 ) -> nx.DiGraph:
     """
-    Constructs a NetworkX directed graph from OSM cache or custom definitions.
+    Constructs a NetworkX directed graph from the real OSM cache.
+    Never silently falls back to a toy graph in production.
     """
     if custom_nodes is None and custom_edges is None:
         osm_graph = load_cached_osm_graph()
         if osm_graph is not None:
             return osm_graph
+        if os.environ.get("ROADSAFE_ALLOW_TEST_FIXTURE") != "1":
+            raise RuntimeError("Real OpenStreetMap road network is unavailable.")
 
     nodes = custom_nodes if custom_nodes is not None else SEEDED_NODES
     edges = custom_edges if custom_edges is not None else SEEDED_EDGES

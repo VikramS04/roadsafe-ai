@@ -80,17 +80,49 @@ export interface HazardReport {
   reportedAt: string;
   expiresAt: string;
   decayFactor?: number;
+  source?: string;
+  isImported?: boolean;
+  stateRegion?: string;
+  areaDesc?: string;
+  geometryJson?: string;
+  lastCheckedAt?: string;
+}
+
+export interface HazardSourceStatusInfo {
+  id: string;
+  providerName: string;
+  stateRegion: string;
+  status: 'hazards_reported' | 'no_records' | 'unavailable' | 'stale';
+  recordCount: number;
+  lastCheckedAt: string;
+  lastSuccessAt?: string | null;
+  errorMessage?: string | null;
+  isStale: boolean;
 }
 
 export interface WeatherConditions {
   latitude: number;
   longitude: number;
-  currentPrecipitationMm: number;
-  currentRainMm: number;
-  weatherCode: number;
+  currentPrecipitationMm: number | null;
+  currentRainMm: number | null;
+  weatherCode: number | null;
   conditionDescription: string;
+  source?: 'open-meteo' | 'unavailable';
   isStale: boolean;
-  fetchedAt: string;
+  unavailable?: boolean;
+  fetchedAt: string | null;
+  error?: string;
+}
+
+export interface ConditionsResponse {
+  weather: WeatherConditions;
+  alerts: OfficialAlert[];
+  alertsMeta?: {
+    configured: boolean;
+    isStale: boolean;
+    fetchedAt: string | null;
+  };
+  timestamp: string;
 }
 
 export interface OfficialAlert {
@@ -157,6 +189,13 @@ export interface RoutePlanningResponse {
   request_id: string;
   status: 'FEASIBLE' | 'NO_FEASIBLE_ROUTE' | 'DEGRADED';
   objective: 'safest' | 'fastest';
+  routing_provider?: 'east_khasi_hills_osm' | 'osrm_global';
+  routing_mode?: 'hazard_aware_local' | 'ordinary_with_hazards' | 'ordinary_unverified';
+  hazard_coverage?: {
+    status: 'verified' | 'partial' | 'unavailable' | 'no_records';
+    warning: string | null;
+  };
+  vehicle_limitations?: string | null;
   vehicle: {
     id: string;
     name: string;
@@ -180,5 +219,7 @@ export interface GeocodeResult {
   lat: number;
   lng: number;
   node_id?: string;
+  in_coverage?: boolean;
+  coverage_zone?: 'local_hazard_aware' | 'regional_hazards' | 'global_ordinary';
   source?: string;
 }

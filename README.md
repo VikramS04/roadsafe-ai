@@ -149,16 +149,21 @@ Open `http://localhost:5173` in your browser.
 cd backend/routing-engine
 PYTHONPATH=. pytest tests/test_routing_engine.py
 
-# 2. Hazard Voting & Threshold Unit Tests
+# 2. Node API & Admin Security / E2E Suites
 cd backend/node-api
-node --test test/hazards.test.js
+npm test
 
-# 3. Full Public Driver End-to-End Suite
-cd backend/node-api
-node --test test/e2e_public.test.js
+# 3. Frontend Navigation Engine & Component Tests + Production Build
+cd frontend
+npm test && npm run build
 ```
 
 ---
 
-## 7. OpenStreetMap Attribution
+## 7. Admin Moderation Console (`/admin`)
+See [docs/ADMIN.md](docs/ADMIN.md) for creating the first admin account via CLI (`scripts/create-admin.ts`), role permissions (`admin` vs `moderator`), httpOnly cookie + CSRF security, and audit logging.
+
+---
+
+## 8. OpenStreetMap Attribution
 Map data © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright), licensed under the Open Data Commons Open Database License (ODbL) 1.0. RoadSafe AI extracts, topologies, and displays real-world highway geometries for East Khasi Hills (Meghalaya, India) courtesy of OpenStreetMap contributors.

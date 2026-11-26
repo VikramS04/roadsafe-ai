@@ -1,483 +1,371 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { RouteAlternative, HazardReport, TurnInstruction } from '../types';
+import { RouteAlternative, HazardReport } from '../types';
+import {
+  NavigationEngine,
+  NavigationSnapshot,
+  NavigationStep,
+  PositionFix,
+  computeCumulativeDistances,
+  getDistanceMeters,
+} from '../services/navigationEngine';
 
-export interface NavigationStep {
-  index: number;
-  edgeId: string;
-  roadName: string;
-  distanceKm: number;
-  safetyScore: number;
-  riskBand: 'Green' | 'Yellow' | 'Red';
-  maneuver: 'straight' | 'left' | 'right' | 'arrive';
-  maneuverIcon: string;
-  instruction: string;
-  startCoords: [number, number]; // [lng, lat]
-  endCoords: [number, number];   // [lng, lat]
-  hazardAhead?: HazardReport;
-}
+export type { NavigationStep };
 
 export interface DrivingState {
   isNavigating: boolean;
-  isSimulating: boolean;
+  isPaused: boolean;
+  isDemoDrive: boolean;
   simulationMultiplier: number;
   currentCoords: [number, number] | null; // [lat, lng]
-  bearing: number; // 0 - 360 degrees
+  bearing: number;
   speedKmh: number;
   accuracyM: number;
   stepIndex: number;
   currentStep: NavigationStep | null;
+  nextStep: NavigationStep | null;
   currentTurnInstruction: string;
+  nextRoadName: string;
+  laneHint: string;
   distanceToTurnM: number;
   distanceRemainingKm: number;
   timeRemainingMin: number;
+  arrivalTimestamp: number;
+  upcomingHazard: { hazard: HazardReport; distanceAheadM: number } | null;
   isMuted: boolean;
   hasArrived: boolean;
   isOffRoute: boolean;
+  isRerouting: boolean;
   isFollowingCamera: boolean;
+  wakeLockActive: boolean;
+  gpsError: { code: 'PERMISSION_DENIED' | 'POSITION_UNAVAILABLE' | 'TIMEOUT' | 'UNSUPPORTED'; message: string } | null;
 }
 
-// Haversine distance in meters between two lat/lng points
-function getDistanceMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const R = 6371e3;
-  const φ1 = (lat1 * Math.PI) / 180;
-  const φ2 = (lat2 * Math.PI) / 180;
-  const Δφ = ((lat2 - lat1) * Math.PI) / 180;
-  const Δλ = ((lon2 - lon1) * Math.PI) / 180;
-  const a = Math.sin(Δφ / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
+const INITIAL_DRIVING_STATE: DrivingState = {
+  isNavigating: false,
+  isPaused: false,
+  isDemoDrive: false,
+  simulationMultiplier: 2,
+  currentCoords: null,
+  bearing: 0,
+  speedKmh: 0,
+  accuracyM: 5,
+  stepIndex: 0,
+  currentStep: null,
+  nextStep: null,
+  currentTurnInstruction: '',
+  nextRoadName: '',
+  laneHint: '',
+  distanceToTurnM: 0,
+  distanceRemainingKm: 0,
+  timeRemainingMin: 0,
+  arrivalTimestamp: Date.now(),
+  upcomingHazard: null,
+  isMuted: false,
+  hasArrived: false,
+  isOffRoute: false,
+  isRerouting: false,
+  isFollowingCamera: true,
+  wakeLockActive: false,
+  gpsError: null,
+};
 
-// Initial bearing from point 1 to point 2
-function getBearing(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const y = Math.sin(((lon2 - lon1) * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180);
-  const x =
-    Math.cos((lat1 * Math.PI) / 180) * Math.sin((lat2 * Math.PI) / 180) -
-    Math.sin((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.cos(((lon2 - lon1) * Math.PI) / 180);
-  const θ = Math.atan2(y, x);
-  return ((θ * 180) / Math.PI + 360) % 360;
-}
+export const IS_DEV_BUILD = import.meta.env.DEV;
 
-// Smallest difference between two bearings in [-180, 180]
-function angleDifference(target: number, current: number): number {
-  let diff = (target - current + 180) % 360 - 180;
-  return diff < -180 ? diff + 360 : diff;
-}
+export function useDrivingNavigation(
+  onOffRouteReroute?: (snappedOrCurrentOrigin: { lat: number; lng: number }) => Promise<RouteAlternative | null>
+) {
+  const [drivingState, setDrivingState] = useState<DrivingState>(INITIAL_DRIVING_STATE);
 
-export function useDrivingNavigation(onRecalculate?: () => void) {
-  const [drivingState, setDrivingState] = useState<DrivingState>({
-    isNavigating: false,
-    isSimulating: false,
-    simulationMultiplier: 2,
-    currentCoords: null,
-    bearing: 0,
-    speedKmh: 0,
-    accuracyM: 5,
-    stepIndex: 0,
-    currentStep: null,
-    currentTurnInstruction: '',
-    distanceToTurnM: 0,
-    distanceRemainingKm: 0,
-    timeRemainingMin: 0,
-    isMuted: false,
-    hasArrived: false,
-    isOffRoute: false,
-    isFollowingCamera: true,
-  });
-
+  const engineRef = useRef<NavigationEngine | null>(null);
   const activeRouteRef = useRef<RouteAlternative | null>(null);
-  const stepsRef = useRef<NavigationStep[]>([]);
-  const turnInstructionsRef = useRef<TurnInstruction[]>([]);
   const hazardsRef = useRef<HazardReport[]>([]);
-  const polylineDistancesRef = useRef<number[]>([]); // cumulative distance to each vertex
-  const totalRouteMetersRef = useRef<number>(0);
-  const currentTraveledMetersRef = useRef<number>(0);
-  const currentBearingRef = useRef<number>(0);
-  const offRouteCountRef = useRef<number>(0);
-  const lastRerouteTimeRef = useRef<number>(0);
-  const animFrameRef = useRef<number | null>(null);
   const watchIdRef = useRef<number | null>(null);
-  const lastSpokenInstructionRef = useRef<string>('');
-  const lastSpokenTurnKeyRef = useRef<string>('');
-  const prevGpsPosRef = useRef<{ lat: number; lng: number; time: number } | null>(null);
+  const demoAnimRef = useRef<number | null>(null);
+  const demoDistRef = useRef<number>(0);
+  const demoCumDistsRef = useRef<number[]>([]);
+  const wakeLockRef = useRef<WakeLockSentinel | null>(null);
+  const isMutedRef = useRef<boolean>(false);
+  const speechQueueRef = useRef<string[]>([]);
+  const isSpeakingRef = useRef<boolean>(false);
+  const rerouteInFlightRef = useRef<boolean>(false);
+  const [gpsRetryToken, setGpsRetryToken] = useState(0);
 
-  // Voice Speech Helper
-  const speak = useCallback((text: string, force = false) => {
-    if (drivingState.isMuted && !force) return;
-    if (!('speechSynthesis' in window)) return;
-    if (lastSpokenInstructionRef.current === text) return;
+  // Web Speech API sequential queue (never overlaps, supports mute and cancel stale)
+  const processSpeechQueue = useCallback(() => {
+    if (isMutedRef.current || !('speechSynthesis' in window)) {
+      speechQueueRef.current = [];
+      isSpeakingRef.current = false;
+      return;
+    }
+    if (isSpeakingRef.current || speechQueueRef.current.length === 0) return;
 
-    lastSpokenInstructionRef.current = text;
-    window.speechSynthesis.cancel();
+    const text = speechQueueRef.current.shift()!;
+    isSpeakingRef.current = true;
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.rate = 1.0;
     utterance.pitch = 1.0;
+    utterance.onend = () => {
+      isSpeakingRef.current = false;
+      processSpeechQueue();
+    };
+    utterance.onerror = () => {
+      isSpeakingRef.current = false;
+      processSpeechQueue();
+    };
     window.speechSynthesis.speak(utterance);
-  }, [drivingState.isMuted]);
+  }, []);
 
-  // Pre-calculate cumulative distance along the full curved polyline
-  const precomputePolylineDistances = (coords: number[][]) => {
-    const dists = [0];
-    let total = 0;
-    for (let i = 1; i < coords.length; i++) {
-      const d = getDistanceMeters(coords[i - 1][1], coords[i - 1][0], coords[i][1], coords[i][0]);
-      total += d;
-      dists.push(total);
-    }
-    polylineDistancesRef.current = dists;
-    totalRouteMetersRef.current = total;
-  };
-
-  // Build steps from Route edges
-  const buildSteps = (route: RouteAlternative, hazards: HazardReport[]): NavigationStep[] => {
-    const steps: NavigationStep[] = [];
-    const edges = route.edges || [];
-
-    for (let i = 0; i < edges.length; i++) {
-      const e = edges[i];
-      const startCoord = (e.coordinates && e.coordinates[0]) || [0, 0];
-      const endCoord = (e.coordinates && e.coordinates[e.coordinates.length - 1]) || [0, 0];
-
-      let maneuver: 'straight' | 'left' | 'right' | 'arrive' = 'straight';
-      let icon = '⬆️';
-
-      if (i === edges.length - 1) {
-        maneuver = 'arrive';
-        icon = '🏁';
-      } else {
-        const nextEdge = edges[i + 1];
-        const nextStart = (nextEdge.coordinates && nextEdge.coordinates[0]) || [0, 0];
-        const nextEnd = (nextEdge.coordinates && nextEdge.coordinates[nextEdge.coordinates.length - 1]) || [0, 0];
-
-        const b1 = getBearing(startCoord[1], startCoord[0], endCoord[1], endCoord[0]);
-        const b2 = getBearing(nextStart[1], nextStart[0], nextEnd[1], nextEnd[0]);
-        let diff = (b2 - b1 + 360) % 360;
-        if (diff > 180) diff -= 360;
-
-        if (diff < -35) {
-          maneuver = 'left';
-          icon = '⬅️';
-        } else if (diff > 35) {
-          maneuver = 'right';
-          icon = '➡️';
+  const enqueueAnnouncements = useCallback(
+    (messages: string[], cancelStale = false) => {
+      if (isMutedRef.current || !('speechSynthesis' in window) || messages.length === 0) return;
+      if (cancelStale) {
+        window.speechSynthesis.cancel();
+        speechQueueRef.current = [];
+        isSpeakingRef.current = false;
+      }
+      for (const msg of messages) {
+        if (!speechQueueRef.current.includes(msg)) {
+          speechQueueRef.current.push(msg);
         }
       }
+      processSpeechQueue();
+    },
+    [processSpeechQueue]
+  );
 
-      const hazard = hazards.find((h) => h.edgeId === e.edge_id && h.status !== 'cleared');
-
-      let instruction = '';
-      if (maneuver === 'arrive') {
-        instruction = `In ${e.distance_km} km, arrive at your final destination on ${e.name || 'destination road'}`;
-      } else if (maneuver === 'left') {
-        instruction = `Continue on ${e.name || 'road'}, then in ${e.distance_km} km turn left`;
-      } else if (maneuver === 'right') {
-        instruction = `Continue on ${e.name || 'road'}, then in ${e.distance_km} km turn right`;
-      } else {
-        instruction = `Continue on ${e.name || 'road'} for ${e.distance_km} km`;
+  // Screen Wake Lock management
+  const acquireWakeLock = useCallback(async () => {
+    try {
+      if ('wakeLock' in navigator && document.visibilityState === 'visible') {
+        const sentinel = await navigator.wakeLock.request('screen');
+        wakeLockRef.current = sentinel;
+        setDrivingState((prev) => ({ ...prev, wakeLockActive: true }));
+        sentinel.addEventListener('release', () => {
+          setDrivingState((prev) => ({ ...prev, wakeLockActive: false }));
+        });
       }
-
-      if (hazard) {
-        instruction += `. Caution: ${hazard.type.replace('_', ' ')} reported ahead`;
-      }
-
-      steps.push({
-        index: i,
-        edgeId: e.edge_id,
-        roadName: e.name || e.edge_id,
-        distanceKm: e.distance_km,
-        safetyScore: e.safety_score,
-        riskBand: e.risk_band,
-        maneuver,
-        maneuverIcon: icon,
-        instruction,
-        startCoords: [startCoord[0], startCoord[1]],
-        endCoords: [endCoord[0], endCoord[1]],
-        hazardAhead: hazard,
-      });
+    } catch {
+      setDrivingState((prev) => ({ ...prev, wakeLockActive: false }));
     }
+  }, []);
 
-    return steps;
-  };
+  const releaseWakeLock = useCallback(async () => {
+    try {
+      if (wakeLockRef.current) {
+        await wakeLockRef.current.release();
+        wakeLockRef.current = null;
+      }
+    } catch {
+      // ignore
+    }
+    setDrivingState((prev) => ({ ...prev, wakeLockActive: false }));
+  }, []);
 
-  // Shared progress calculation for both Live GPS and Simulation
-  const updateProgress = useCallback((
-    curLat: number,
-    curLng: number,
-    traveledMeters: number,
-    speedKmh: number,
-    targetBearing: number,
-    accuracyM = 5
-  ) => {
-    const totalMeters = totalRouteMetersRef.current;
-    currentTraveledMetersRef.current = traveledMeters;
+  // Re-acquire Wake Lock when tab becomes visible again
+  useEffect(() => {
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && drivingState.isNavigating && !drivingState.isPaused) {
+        acquireWakeLock();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
+  }, [drivingState.isNavigating, drivingState.isPaused, acquireWakeLock]);
 
-    // Check Destination Arrival
-    if (traveledMeters >= totalMeters - 25) {
+  // Apply snapshot from pure NavigationEngine to React state + trigger speech/reroute
+  const applySnapshot = useCallback(
+    (snap: NavigationSnapshot) => {
+      if (snap.ignoredReason) return;
+
+      if (snap.announcements.length > 0) {
+        const urgent = snap.shouldReroute || snap.hasArrived;
+        enqueueAnnouncements(snap.announcements, urgent);
+      }
+
       setDrivingState((prev) => ({
         ...prev,
-        hasArrived: true,
-        speedKmh: 0,
-        distanceToTurnM: 0,
-        distanceRemainingKm: 0,
-        timeRemainingMin: 0,
-        currentCoords: [curLat, curLng],
+        currentCoords: snap.currentCoords,
+        bearing: snap.bearing,
+        speedKmh: snap.speedKmh,
+        accuracyM: snap.accuracyM,
+        stepIndex: snap.stepIndex,
+        currentStep: snap.currentStep,
+        nextStep: snap.nextStep,
+        currentTurnInstruction: snap.currentTurnInstruction,
+        nextRoadName: snap.nextRoadName,
+        laneHint: snap.laneHint,
+        distanceToTurnM: snap.distanceToTurnM,
+        distanceRemainingKm: snap.distanceRemainingKm,
+        timeRemainingMin: snap.timeRemainingMin,
+        arrivalTimestamp: snap.arrivalTimestamp,
+        upcomingHazard: snap.upcomingHazard,
+        hasArrived: snap.hasArrived,
+        isOffRoute: snap.isOffRoute,
+        gpsError: null,
       }));
-      speak('You have safely arrived at your destination! RoadSafe AI navigation complete.', true);
-      return;
-    }
 
-    // Smooth bearing
-    const diff = angleDifference(targetBearing, currentBearingRef.current);
-    const smoothedBearing = (currentBearingRef.current + diff * 0.25 + 360) % 360;
-    currentBearingRef.current = smoothedBearing;
-
-    // Distance & time remaining
-    const remMeters = Math.max(0, totalMeters - traveledMeters);
-    const remKm = Number((remMeters / 1000).toFixed(1));
-    const effectiveSpeed = Math.max(20, speedKmh || 35);
-    const remTimeMin = Math.max(1, Math.round((remKm / effectiveSpeed) * 60));
-
-    // Match upcoming turn instruction
-    const turnInstructions = turnInstructionsRef.current;
-    let activeTurnText = '';
-    let distToTurn = 500;
-    let nextTurnAction = 'continue';
-
-    if (turnInstructions && turnInstructions.length > 0) {
-      for (let i = 0; i < turnInstructions.length; i++) {
-        const tInst = turnInstructions[i];
-        const tDist = getDistanceMeters(curLat, curLng, tInst.location[1], tInst.location[0]);
-        if (tDist > 25) {
-          activeTurnText = tInst.instruction;
-          distToTurn = Math.round(tDist);
-          nextTurnAction = tInst.action;
-
-          // Voice triggers at 250m and 45m before turn
-          const turnKey250 = `${tInst.instruction}-250`;
-          const turnKey45 = `${tInst.instruction}-45`;
-
-          if (distToTurn <= 250 && distToTurn > 60 && lastSpokenTurnKeyRef.current !== turnKey250) {
-            lastSpokenTurnKeyRef.current = turnKey250;
-            speak(`In 250 meters, ${tInst.instruction}`);
-          } else if (distToTurn <= 45 && lastSpokenTurnKeyRef.current !== turnKey45) {
-            lastSpokenTurnKeyRef.current = turnKey45;
-            speak(tInst.instruction);
-          }
-          break;
-        }
+      // Trigger off-route recalculation (keeping old route visible until new route arrives)
+      if (snap.shouldReroute && snap.rerouteOrigin && onOffRouteReroute && !rerouteInFlightRef.current) {
+        rerouteInFlightRef.current = true;
+        setDrivingState((prev) => ({ ...prev, isRerouting: true }));
+        onOffRouteReroute(snap.rerouteOrigin)
+          .then((newRoute) => {
+            if (newRoute && newRoute.coordinates?.length) {
+              activeRouteRef.current = newRoute;
+              const newEngine = new NavigationEngine(newRoute, hazardsRef.current);
+              engineRef.current = newEngine;
+              demoDistRef.current = 0;
+              demoCumDistsRef.current = computeCumulativeDistances(newRoute.coordinates);
+              const initSnap = newEngine.getInitialSnapshot();
+              enqueueAnnouncements(['Route updated. ' + initSnap.currentTurnInstruction], true);
+              setDrivingState((prev) => ({
+                ...prev,
+                isOffRoute: false,
+                isRerouting: false,
+                stepIndex: initSnap.stepIndex,
+                currentStep: initSnap.currentStep,
+                nextStep: initSnap.nextStep,
+                currentTurnInstruction: initSnap.currentTurnInstruction,
+                nextRoadName: initSnap.nextRoadName,
+                laneHint: initSnap.laneHint,
+                distanceToTurnM: initSnap.distanceToTurnM,
+                distanceRemainingKm: initSnap.distanceRemainingKm,
+                timeRemainingMin: initSnap.timeRemainingMin,
+                arrivalTimestamp: initSnap.arrivalTimestamp,
+              }));
+            } else {
+              setDrivingState((prev) => ({ ...prev, isRerouting: false }));
+            }
+          })
+          .catch(() => {
+            setDrivingState((prev) => ({ ...prev, isRerouting: false }));
+          })
+          .finally(() => {
+            rerouteInFlightRef.current = false;
+          });
       }
-    }
+    },
+    [enqueueAnnouncements, onOffRouteReroute]
+  );
 
-    // Step matching
-    const steps = stepsRef.current;
-    let activeStep = steps[0] || null;
-    let stepIdx = 0;
-    for (let s = 0; s < steps.length; s++) {
-      const step = steps[s];
-      const dStart = getDistanceMeters(curLat, curLng, step.startCoords[1], step.startCoords[0]);
-      const dEnd = getDistanceMeters(curLat, curLng, step.endCoords[1], step.endCoords[0]);
-      if (dStart <= step.distanceKm * 1000 && dEnd > 15) {
-        activeStep = step;
-        stepIdx = s;
-        break;
-      }
-    }
+  // Inject any PositionFix (shared by real GPS watchPosition AND dev-only Demo Drive)
+  const injectPositionFix = useCallback(
+    (fix: PositionFix) => {
+      if (!engineRef.current) return;
+      const snap = engineRef.current.processPositionFix(fix);
+      applySnapshot(snap);
+    },
+    [applySnapshot]
+  );
 
-    setDrivingState((prev) => ({
-      ...prev,
-      currentCoords: [curLat, curLng],
-      bearing: Math.round(smoothedBearing),
-      speedKmh,
-      accuracyM,
-      stepIndex: stepIdx,
-      currentStep: activeStep,
-      currentTurnInstruction: activeTurnText || prev.currentTurnInstruction || 'Continue straight along corridor',
-      distanceToTurnM: distToTurn,
-      distanceRemainingKm: remKm,
-      timeRemainingMin: remTimeMin,
-    }));
-  }, [speak]);
+  const startNavigation = useCallback(
+    (route: RouteAlternative, hazards: HazardReport[] = [], demoDrive = false) => {
+      if (!route.coordinates || route.coordinates.length === 0) return;
+      // Production builds never auto-simulate
+      const useDemo = IS_DEV_BUILD && demoDrive;
 
-  // Handle GPS location update from live hardware / browser
-  const handleGpsUpdate = useCallback((
-    lat: number,
-    lng: number,
-    rawSpeed: number | null,
-    rawHeading: number | null,
-    accuracy = 5
-  ) => {
-    const route = activeRouteRef.current;
-    if (!route || !route.coordinates || route.coordinates.length < 2) return;
+      activeRouteRef.current = route;
+      hazardsRef.current = hazards;
+      const engine = new NavigationEngine(route, hazards);
+      engineRef.current = engine;
+      demoDistRef.current = 0;
+      demoCumDistsRef.current = computeCumulativeDistances(route.coordinates);
+      rerouteInFlightRef.current = false;
 
-    const coords = route.coordinates;
-    const dists = polylineDistancesRef.current;
+      const initSnap = engine.getInitialSnapshot();
+      isMutedRef.current = false;
 
-    // Map-matching: find nearest point along active polyline
-    let minPerpDist = Infinity;
-    let closestTraveledMeters = 0;
-    let snappedLat = lat;
-    let snappedLng = lng;
-    let tangentBearing = rawHeading !== null ? rawHeading : 0;
+      setDrivingState({
+        ...INITIAL_DRIVING_STATE,
+        isNavigating: true,
+        isPaused: false,
+        isDemoDrive: useDemo,
+        simulationMultiplier: 2,
+        currentCoords: initSnap.currentCoords,
+        bearing: initSnap.bearing,
+        speedKmh: 0,
+        accuracyM: initSnap.accuracyM,
+        stepIndex: initSnap.stepIndex,
+        currentStep: initSnap.currentStep,
+        nextStep: initSnap.nextStep,
+        currentTurnInstruction: initSnap.currentTurnInstruction,
+        nextRoadName: initSnap.nextRoadName,
+        laneHint: initSnap.laneHint,
+        distanceToTurnM: initSnap.distanceToTurnM,
+        distanceRemainingKm: initSnap.distanceRemainingKm,
+        timeRemainingMin: initSnap.timeRemainingMin,
+        arrivalTimestamp: initSnap.arrivalTimestamp,
+        isFollowingCamera: true,
+      });
 
-    for (let i = 0; i < coords.length - 1; i++) {
-      const p1 = coords[i];
-      const p2 = coords[i + 1];
-      const segLen = getDistanceMeters(p1[1], p1[0], p2[1], p2[0]);
-      if (segLen === 0) continue;
+      enqueueAnnouncements(initSnap.announcements, true);
+      acquireWakeLock();
+    },
+    [acquireWakeLock, enqueueAnnouncements]
+  );
 
-      const d1 = getDistanceMeters(lat, lng, p1[1], p1[0]);
-      const d2 = getDistanceMeters(lat, lng, p2[1], p2[0]);
-
-      // Projection parameter t
-      const t = Math.max(0, Math.min(1, (d1 * d1 - d2 * d2 + segLen * segLen) / (2 * segLen * segLen)));
-      const projLat = p1[1] + t * (p2[1] - p1[1]);
-      const projLng = p1[0] + t * (p2[0] - p1[0]);
-      const perpDist = getDistanceMeters(lat, lng, projLat, projLng);
-
-      if (perpDist < minPerpDist) {
-        minPerpDist = perpDist;
-        snappedLat = projLat;
-        snappedLng = projLng;
-        closestTraveledMeters = (dists[i] || 0) + t * segLen;
-        tangentBearing = getBearing(p1[1], p1[0], p2[1], p2[0]);
-      }
-    }
-
-    // Map-matching guard: check if device is off-route (> 40m)
-    if (minPerpDist > 40.0) {
-      offRouteCountRef.current += 1;
-      if (offRouteCountRef.current >= 3) {
-        const now = Date.now();
-        if (now - lastRerouteTimeRef.current > 10000) {
-          lastRerouteTimeRef.current = now;
-          setDrivingState((prev) => ({ ...prev, isOffRoute: true }));
-          speak('You are off route. Recalculating safest route from your current location.');
-          onRecalculate?.();
-        }
-      }
-    } else {
-      offRouteCountRef.current = 0;
-      setDrivingState((prev) => ({ ...prev, isOffRoute: false }));
-    }
-
-    // Calculate speed
-    const now = Date.now();
-    let speedKmh = rawSpeed !== null ? Math.round(rawSpeed * 3.6) : 0;
-    if (prevGpsPosRef.current && speedKmh === 0) {
-      const prev = prevGpsPosRef.current;
-      const dtSec = Math.max(0.5, (now - prev.time) / 1000);
-      const movedMeters = getDistanceMeters(lat, lng, prev.lat, prev.lng);
-      if (movedMeters > 1.5) {
-        speedKmh = Math.round((movedMeters / dtSec) * 3.6);
-      }
-    }
-    prevGpsPosRef.current = { lat, lng, time: now };
-
-    const effectiveBearing = rawHeading !== null ? rawHeading : tangentBearing;
-    updateProgress(snappedLat, snappedLng, closestTraveledMeters, speedKmh, effectiveBearing, accuracy);
-  }, [speak, onRecalculate, updateProgress]);
-
-  // Start Navigation
-  const startNavigation = useCallback((
-    route: RouteAlternative,
-    hazards: HazardReport[] = [],
-    simulate = false // default to live GPS driving mode
-  ) => {
-    activeRouteRef.current = route;
-    hazardsRef.current = hazards;
-    turnInstructionsRef.current = route.turn_instructions || [];
-
-    const coords = route.coordinates || [];
-    if (!coords.length) return;
-
-    precomputePolylineDistances(coords);
-    currentTraveledMetersRef.current = 0;
-    offRouteCountRef.current = 0;
-    lastSpokenTurnKeyRef.current = '';
-
-    const steps = buildSteps(route, hazards);
-    stepsRef.current = steps;
-
-    const initialCoords: [number, number] = [coords[0][1], coords[0][0]];
-    const initialBearing = coords.length >= 2
-      ? getBearing(coords[0][1], coords[0][0], coords[1][1], coords[1][0])
-      : 0;
-    currentBearingRef.current = initialBearing;
-
-    const initialInstruction = (route.turn_instructions && route.turn_instructions[0]?.instruction)
-      || (steps[0]?.instruction)
-      || 'Head towards your destination';
-
-    setDrivingState({
-      isNavigating: true,
-      isSimulating: simulate,
-      simulationMultiplier: 2,
-      currentCoords: initialCoords,
-      bearing: initialBearing,
-      speedKmh: simulate ? 45 : 0,
-      accuracyM: 5,
-      stepIndex: 0,
-      currentStep: steps[0] || null,
-      currentTurnInstruction: initialInstruction,
-      distanceToTurnM: Math.round((route.turn_instructions && route.turn_instructions[0]?.distance_km || 1) * 1000),
-      distanceRemainingKm: route.distance_km,
-      timeRemainingMin: Math.round(route.estimated_travel_minutes),
-      isMuted: false,
-      hasArrived: false,
-      isOffRoute: false,
-      isFollowingCamera: true,
-    });
-
-    speak(`Starting RoadSafe navigation. ${initialInstruction}`);
-  }, [speak]);
-
-  // Stop Navigation
   const stopNavigation = useCallback(() => {
     if (watchIdRef.current !== null) {
       navigator.geolocation.clearWatch(watchIdRef.current);
       watchIdRef.current = null;
     }
-    if (animFrameRef.current !== null) {
-      cancelAnimationFrame(animFrameRef.current);
-      animFrameRef.current = null;
+    if (demoAnimRef.current !== null) {
+      cancelAnimationFrame(demoAnimRef.current);
+      demoAnimRef.current = null;
     }
-    window.speechSynthesis?.cancel();
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+    speechQueueRef.current = [];
+    isSpeakingRef.current = false;
+    engineRef.current = null;
+    releaseWakeLock();
 
-    setDrivingState((prev) => ({
-      ...prev,
-      isNavigating: false,
-      isSimulating: false,
-      hasArrived: false,
-      isOffRoute: false,
-    }));
-  }, []);
+    setDrivingState(INITIAL_DRIVING_STATE);
+  }, [releaseWakeLock]);
 
-  // Toggle Mute
+  const pauseNavigation = useCallback(() => {
+    engineRef.current?.setPaused(true);
+    releaseWakeLock();
+    setDrivingState((prev) => ({ ...prev, isPaused: true, speedKmh: 0 }));
+  }, [releaseWakeLock]);
+
+  const resumeNavigation = useCallback(() => {
+    engineRef.current?.setPaused(false);
+    acquireWakeLock();
+    setDrivingState((prev) => ({ ...prev, isPaused: false }));
+  }, [acquireWakeLock]);
+
   const toggleMute = useCallback(() => {
     setDrivingState((prev) => {
       const nextMuted = !prev.isMuted;
-      if (nextMuted) window.speechSynthesis?.cancel();
+      isMutedRef.current = nextMuted;
+      if (nextMuted && 'speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+        speechQueueRef.current = [];
+        isSpeakingRef.current = false;
+      }
       return { ...prev, isMuted: nextMuted };
     });
   }, []);
 
-  // Toggle Simulation Speed (1x, 2x, 5x)
+  const toggleDemoDrive = useCallback(() => {
+    if (!IS_DEV_BUILD) return;
+    setDrivingState((prev) => ({
+      ...prev,
+      isDemoDrive: !prev.isDemoDrive,
+      isFollowingCamera: true,
+      gpsError: null,
+    }));
+  }, []);
+
   const setSimulationMultiplier = useCallback((multiplier: number) => {
     setDrivingState((prev) => ({
       ...prev,
       simulationMultiplier: multiplier,
-      speedKmh: Math.round(35 * multiplier),
     }));
   }, []);
 
-  // Toggle Simulation on/off (Live GPS vs Demo Simulation)
-  const toggleSimulation = useCallback(() => {
-    setDrivingState((prev) => {
-      const nextSim = !prev.isSimulating;
-      return { ...prev, isSimulating: nextSim, isFollowingCamera: true };
-    });
-  }, []);
-
-  // Toggle Camera Auto-Follow
   const toggleFollowCamera = useCallback((follow?: boolean) => {
     setDrivingState((prev) => ({
       ...prev,
@@ -485,9 +373,14 @@ export function useDrivingNavigation(onRecalculate?: () => void) {
     }));
   }, []);
 
-  // Watch GPS during live navigation
+  const retryGps = useCallback(() => {
+    setDrivingState((prev) => ({ ...prev, gpsError: null }));
+    setGpsRetryToken((t) => t + 1);
+  }, []);
+
+  // Real GPS position source via navigator.geolocation.watchPosition
   useEffect(() => {
-    if (!drivingState.isNavigating || drivingState.isSimulating) {
+    if (!drivingState.isNavigating || drivingState.isDemoDrive || drivingState.isPaused) {
       if (watchIdRef.current !== null) {
         navigator.geolocation.clearWatch(watchIdRef.current);
         watchIdRef.current = null;
@@ -496,23 +389,53 @@ export function useDrivingNavigation(onRecalculate?: () => void) {
     }
 
     if (!('geolocation' in navigator)) {
-      console.warn('Geolocation not supported, falling back to simulation.');
-      setDrivingState((prev) => ({ ...prev, isSimulating: true }));
+      setDrivingState((prev) => ({
+        ...prev,
+        gpsError: {
+          code: 'UNSUPPORTED',
+          message: 'Geolocation is not supported by your browser.',
+        },
+      }));
       return;
     }
 
     const handleSuccess = (pos: GeolocationPosition) => {
-      handleGpsUpdate(
-        pos.coords.latitude,
-        pos.coords.longitude,
-        pos.coords.speed,
-        pos.coords.heading,
-        Math.round(pos.coords.accuracy)
-      );
+      injectPositionFix({
+        lat: pos.coords.latitude,
+        lng: pos.coords.longitude,
+        accuracyM: pos.coords.accuracy,
+        speedMps: pos.coords.speed,
+        headingDeg: pos.coords.heading,
+        timestamp: pos.timestamp || Date.now(),
+      });
     };
 
     const handleError = (err: GeolocationPositionError) => {
-      console.warn('Live navigation GPS error:', err.message);
+      if (err.code === err.PERMISSION_DENIED) {
+        setDrivingState((prev) => ({
+          ...prev,
+          gpsError: {
+            code: 'PERMISSION_DENIED',
+            message: 'Location permission denied. Enable GPS access in browser settings and tap Retry.',
+          },
+        }));
+      } else if (err.code === err.POSITION_UNAVAILABLE) {
+        setDrivingState((prev) => ({
+          ...prev,
+          gpsError: {
+            code: 'POSITION_UNAVAILABLE',
+            message: 'GPS signal unavailable. Move to an open area or check device location services.',
+          },
+        }));
+      } else if (err.code === err.TIMEOUT) {
+        setDrivingState((prev) => ({
+          ...prev,
+          gpsError: {
+            code: 'TIMEOUT',
+            message: 'GPS fix timed out. Tap Retry to reacquire location.',
+          },
+        }));
+      }
     };
 
     watchIdRef.current = navigator.geolocation.watchPosition(handleSuccess, handleError, {
@@ -527,72 +450,87 @@ export function useDrivingNavigation(onRecalculate?: () => void) {
         watchIdRef.current = null;
       }
     };
-  }, [drivingState.isNavigating, drivingState.isSimulating, handleGpsUpdate]);
+  }, [drivingState.isNavigating, drivingState.isDemoDrive, drivingState.isPaused, gpsRetryToken, injectPositionFix]);
 
-  // Simulation Animation Loop following exact polyline curvature
+  // Dev-only Demo Drive: injects synthetic GPS fixes into the SAME NavigationEngine
   useEffect(() => {
-    if (!drivingState.isNavigating || !drivingState.isSimulating) {
-      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+    if (!IS_DEV_BUILD || !drivingState.isNavigating || !drivingState.isDemoDrive || drivingState.isPaused) {
+      if (demoAnimRef.current !== null) {
+        cancelAnimationFrame(demoAnimRef.current);
+        demoAnimRef.current = null;
+      }
       return;
     }
 
     let lastTimestamp = performance.now();
+    let lastEmitTime = 0;
 
-    const animate = (timestamp: number) => {
-      const deltaMs = Math.min(100, timestamp - lastTimestamp);
-      lastTimestamp = timestamp;
+    const tick = (now: number) => {
+      const deltaMs = Math.min(100, now - lastTimestamp);
+      lastTimestamp = now;
 
-      const route = activeRouteRef.current;
-      const coords = route?.coordinates;
-      const dists = polylineDistancesRef.current;
-      const totalMeters = totalRouteMetersRef.current;
+      const coords = activeRouteRef.current?.coordinates;
+      const dists = demoCumDistsRef.current;
+      const totalMeters = dists[dists.length - 1] || 0;
 
       if (!coords || coords.length < 2 || totalMeters <= 0) return;
 
-      const multiplier = drivingState.simulationMultiplier || 2;
-      const speedMps = 12.5 * multiplier; // 45 km/h at 1x
-      const traveled = currentTraveledMetersRef.current + (speedMps * deltaMs) / 1000;
+      const speedMps = 12.5 * (drivingState.simulationMultiplier || 2);
+      demoDistRef.current = Math.min(totalMeters, demoDistRef.current + (speedMps * deltaMs) / 1000);
 
-      // Binary search segment
-      let low = 0;
-      let high = dists.length - 1;
-      while (low <= high) {
-        const mid = Math.floor((low + high) / 2);
-        if (dists[mid] <= traveled) low = mid + 1;
-        else high = mid - 1;
+      // Emit synthetic fix ~10 times per second to the real NavigationEngine
+      if (now - lastEmitTime >= 100 || demoDistRef.current >= totalMeters) {
+        lastEmitTime = now;
+        let segIdx = 0;
+        for (let i = 0; i < dists.length - 1; i++) {
+          if (dists[i + 1] >= demoDistRef.current) {
+            segIdx = i;
+            break;
+          }
+          segIdx = i;
+        }
+        const segStart = dists[segIdx] ?? 0;
+        const segEnd = dists[segIdx + 1] ?? segStart;
+        const segLen = Math.max(0.1, segEnd - segStart);
+        const t = Math.max(0, Math.min(1, (demoDistRef.current - segStart) / segLen));
+        const p1 = coords[segIdx];
+        const p2 = coords[segIdx + 1] || p1;
+
+        const lat = p1[1] + t * (p2[1] - p1[1]);
+        const lng = p1[0] + t * (p2[0] - p1[0]);
+        const segDist = getDistanceMeters(p1[1], p1[0], p2[1], p2[0]);
+
+        injectPositionFix({
+          lat,
+          lng,
+          accuracyM: 5,
+          speedMps: segDist > 0 ? speedMps : 0,
+          headingDeg: null,
+          timestamp: Date.now(),
+        });
       }
-      const segIdx = Math.max(0, Math.min(coords.length - 2, high));
-      const segStartDist = dists[segIdx];
-      const segEndDist = dists[segIdx + 1];
-      const segLen = Math.max(0.1, segEndDist - segStartDist);
-      const segT = Math.max(0, Math.min(1, (traveled - segStartDist) / segLen));
 
-      const p1 = coords[segIdx];
-      const p2 = coords[segIdx + 1];
-
-      const curLat = p1[1] + segT * (p2[1] - p1[1]);
-      const curLng = p1[0] + segT * (p2[0] - p1[0]);
-      const segBearing = getBearing(p1[1], p1[0], p2[1], p2[0]);
-
-      updateProgress(curLat, curLng, traveled, Math.round(35 * multiplier), segBearing, 0);
-
-      animFrameRef.current = requestAnimationFrame(animate);
+      if (demoDistRef.current < totalMeters) {
+        demoAnimRef.current = requestAnimationFrame(tick);
+      }
     };
 
-    animFrameRef.current = requestAnimationFrame(animate);
-
+    demoAnimRef.current = requestAnimationFrame(tick);
     return () => {
-      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+      if (demoAnimRef.current !== null) cancelAnimationFrame(demoAnimRef.current);
     };
-  }, [drivingState.isNavigating, drivingState.isSimulating, drivingState.simulationMultiplier, updateProgress]);
+  }, [drivingState.isNavigating, drivingState.isDemoDrive, drivingState.isPaused, drivingState.simulationMultiplier, injectPositionFix]);
 
   return {
     drivingState,
     startNavigation,
     stopNavigation,
+    pauseNavigation,
+    resumeNavigation,
     toggleMute,
-    toggleSimulation,
+    toggleDemoDrive,
     setSimulationMultiplier,
     toggleFollowCamera,
+    retryGps,
   };
 }
