@@ -90,6 +90,10 @@ export function useLiveLocation() {
       let msg = 'Unable to retrieve your location.';
       if (err.code === err.PERMISSION_DENIED) {
         msg = 'Location permission was denied. Please allow location access in your browser settings.';
+        if (watchIdRef.current !== null) {
+          navigator.geolocation.clearWatch(watchIdRef.current);
+          watchIdRef.current = null;
+        }
       } else if (err.code === err.POSITION_UNAVAILABLE) {
         msg = 'Location position unavailable. Waiting for GPS fix...';
       } else if (err.code === err.TIMEOUT) {
@@ -113,6 +117,14 @@ export function useLiveLocation() {
     setState((prev) => ({ ...prev, isTracking: false }));
   }, []);
 
+  const retryTracking = useCallback(() => {
+    if (watchIdRef.current !== null) {
+      navigator.geolocation.clearWatch(watchIdRef.current);
+      watchIdRef.current = null;
+    }
+    startTracking();
+  }, [startTracking]);
+
   const setFollowing = useCallback((isFollowing: boolean) => {
     setState((prev) => ({ ...prev, isFollowing }));
   }, []);
@@ -130,6 +142,7 @@ export function useLiveLocation() {
     locationState: state,
     startTracking,
     stopTracking,
+    retryTracking,
     setFollowing,
   };
 }

@@ -40,8 +40,9 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
       bbox = { minLat, minLng, maxLat, maxLng };
     }
 
+    const viewerDeviceId = req.header('x-device-id') || undefined;
     const [hazards, sources] = await Promise.all([
-      getActiveHazards(bbox),
+      getActiveHazards(bbox, viewerDeviceId),
       getHazardSourceStatuses(),
     ]);
 
@@ -81,7 +82,7 @@ router.get('/:id', async (req: Request, res: Response): Promise<void> => {
       where: { id },
       include: {
         votes: {
-          select: { id: true, vote: true, createdAt: true },
+          select: { id: true, vote: true, deviceId: true, createdAt: true },
         },
       },
     });
@@ -91,7 +92,18 @@ router.get('/:id', async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
-    res.json({ hazard: sanitizePublicHazard(hazard) });
+    const viewerDeviceId = req.header('x-device-id') || undefined;
+    const disputeCount = hazard.votes.filter((v) => v.vote === 'no').length;
+    const userVote = viewerDeviceId ? hazard.votes.find((v) => v.deviceId === viewerDeviceId)?.vote ?? null : null;
+    const sanitizedVotes = hazard.votes.map(({ id: vid, vote, createdAt }) => ({ id: vid, vote, createdAt }));
+
+    res.json({
+      hazard: {
+        ...sanitizePublicHazard({ ...hazard, votes: sanitizedVotes }),
+        disputeCount,
+        userVote,
+      },
+    });
   } catch (err: any) {
     res.status(500).json({ error: 'FETCH_HAZARD_FAILED', message: err.message });
   }
@@ -155,6 +167,14 @@ router.post('/:id/vote', deviceAuth, async (req: Request, res: Response): Promis
     const voterLat = voter_latitude !== undefined ? parseFloat(voter_latitude) : undefined;
     const voterLng = voter_longitude !== undefined ? parseFloat(voter_longitude) : undefined;
 
+    if (voterLat === undefined || voterLng === undefined || !Number.isFinite(voterLat) || !Number.isFinite(voterLng)) {
+      res.status(400).json({
+        error: 'PROXIMITY_LOCATION_REQUIRED',
+        message: 'Live GPS coordinates (voter_latitude, voter_longitude) are required to vote within 5 km of the hazard.',
+      });
+      return;
+    }
+
     const result = await voteOnHazardReport({
       reportId: id,
       deviceId,
@@ -168,8 +188,14 @@ router.post('/:id/vote', deviceAuth, async (req: Request, res: Response): Promis
       statusChanged: result.statusChanged,
       newStatus: result.report.status,
       confirmCount: result.report.confirmCount,
+      disputeCount: result.disputeCount,
       clearCount: result.report.clearCount,
-      report: result.report,
+      userVote: vote,
+      report: {
+        ...sanitizePublicHazard(result.report),
+        disputeCount: result.disputeCount,
+        userVote: vote,
+      },
     });
   } catch (err: any) {
     if (err.message && err.message.includes('Unique constraint failed')) {

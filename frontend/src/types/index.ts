@@ -73,7 +73,9 @@ export interface HazardReport {
   lng: number;
   status: 'unverified' | 'confirmed' | 'cleared' | 'expired';
   confirmCount: number;
+  disputeCount?: number;
   clearCount: number;
+  userVote?: 'yes' | 'no' | 'cleared' | null;
   note?: string | null;
   photoUrl?: string | null;
   deviceId: string;

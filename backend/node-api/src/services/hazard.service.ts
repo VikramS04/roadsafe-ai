@@ -212,6 +212,7 @@ export async function voteOnHazardReport(input: VoteHazardInput): Promise<{
   report: HazardReport;
   vote: HazardVote;
   statusChanged: boolean;
+  disputeCount: number;
 }> {
   const report = await prisma.hazardReport.findUnique({
     where: { id: input.reportId },
@@ -228,18 +229,25 @@ export async function voteOnHazardReport(input: VoteHazardInput): Promise<{
 
   const settings = await getAppSettings();
 
-  // 1. Proximity Check (~5 km default, configurable)
-  if (input.voterLatitude !== undefined && input.voterLongitude !== undefined) {
-    const dist = calculateHaversineDistanceMeters(
-      input.voterLatitude,
-      input.voterLongitude,
-      report.lat,
-      report.lng
-    );
-    const maxDistM = settings.proximityRadiusKm * 1000 + 500;
-    if (dist > maxDistM) {
-      throw new Error(`Proximity validation failed: Device is ${(dist / 1000).toFixed(1)} km away. Votes require being within ${settings.proximityRadiusKm} km of the reported hazard.`);
-    }
+  // 1. Proximity Check (~5 km default, configurable) — coordinates are mandatory
+  if (
+    input.voterLatitude === undefined ||
+    input.voterLongitude === undefined ||
+    !Number.isFinite(input.voterLatitude) ||
+    !Number.isFinite(input.voterLongitude)
+  ) {
+    throw new Error('Proximity validation failed: Live GPS coordinates are required to verify you are within 5 km of this hazard.');
+  }
+
+  const dist = calculateHaversineDistanceMeters(
+    input.voterLatitude,
+    input.voterLongitude,
+    report.lat,
+    report.lng
+  );
+  const maxDistM = settings.proximityRadiusKm * 1000 + 500;
+  if (dist > maxDistM) {
+    throw new Error(`Proximity validation failed: Device is ${(dist / 1000).toFixed(1)} km away. Votes require being within ${settings.proximityRadiusKm} km of the reported hazard.`);
   }
 
   let statusChanged = false;
@@ -319,7 +327,11 @@ export async function voteOnHazardReport(input: VoteHazardInput): Promise<{
       }
     }
 
-    return { report: updatedReport, vote: newVote, statusChanged };
+    const disputeCount = await tx.hazardVote.count({
+      where: { reportId: input.reportId, vote: 'no' },
+    });
+
+    return { report: updatedReport, vote: newVote, statusChanged, disputeCount };
   });
 
   if (statusChanged) {
@@ -333,7 +345,10 @@ export async function voteOnHazardReport(input: VoteHazardInput): Promise<{
  * Fetch active hazards (unverified and confirmed, not expired, not shadow-banned)
  * Automatically computes time decay factor: [0, 1]
  */
-export async function getActiveHazards(bbox?: { minLat: number; minLng: number; maxLat: number; maxLng: number }) {
+export async function getActiveHazards(
+  bbox?: { minLat: number; minLng: number; maxLat: number; maxLng: number },
+  viewerDeviceId?: string
+) {
   const now = new Date();
 
   const whereClause: any = {
@@ -353,6 +368,11 @@ export async function getActiveHazards(bbox?: { minLat: number; minLng: number; 
 
   const hazards = await prisma.hazardReport.findMany({
     where: whereClause,
+    include: {
+      votes: {
+        select: { vote: true, deviceId: true },
+      },
+    },
     orderBy: { reportedAt: 'desc' },
   });
 
@@ -360,9 +380,14 @@ export async function getActiveHazards(bbox?: { minLat: number; minLng: number; 
     const ageMs = now.getTime() - new Date(h.reportedAt).getTime();
     const lifespanMs = 6 * 3600 * 1000; // 6 hours
     const decayFactor = Math.max(0, Math.min(1.0, 1.0 - (ageMs / lifespanMs)));
+    const disputeCount = h.votes.filter((v) => v.vote === 'no').length;
+    const myVote = viewerDeviceId ? h.votes.find((v) => v.deviceId === viewerDeviceId)?.vote ?? null : null;
+    const { votes: _votes, ...rest } = h;
 
     return {
-      ...h,
+      ...rest,
+      disputeCount,
+      userVote: myVote,
       decayFactor: Number(decayFactor.toFixed(3)),
     };
   });

@@ -126,8 +126,10 @@ export const RouteBottomSheet: React.FC<RouteBottomSheetProps> = ({
           <span className="text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded bg-blue-950 text-blue-300 border border-blue-800/50">
             {routing_mode === 'hazard_aware_local'
               ? objective === 'fastest'
-                ? '⚡ Fastest (Hazard-Aware)'
-                : '🛡️ Hazard-Aware Route'
+                ? '⚡ Fastest (Time-Optimized)'
+                : '🛡️ Safest (Hazard-Aware)'
+              : objective === 'fastest'
+              ? '⚡ Fastest (Ordinary)'
               : '🗺️ Ordinary Route — Not Hazard-Verified'}
           </span>
         </div>

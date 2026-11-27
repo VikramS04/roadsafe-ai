@@ -18,6 +18,21 @@
   font-family: inherit;
 }
 
+.custom-hazard-pin {
+  transition: transform 0.15s ease, filter 0.15s ease;
+}
+
+.custom-hazard-pin:hover {
+  transform: scale(1.12);
+  filter: brightness(1.15);
+}
+
+.custom-hazard-pin:focus-visible {
+  outline: 3px solid #fbbf24 !important;
+  outline-offset: 3px;
+  border-radius: 10px;
+}
+
 .maplibre-gl {
   background-color: #0B1120 !important;
 }

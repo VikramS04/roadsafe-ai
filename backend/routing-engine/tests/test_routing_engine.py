@@ -260,7 +260,76 @@ def test_unverified_report_applies_mild_penalty_without_hard_close():
     # E1 is NOT pruned
     assert not any(c["edge_id"] == "E1" for c in unv_data["constraints_applied"])
     # Path still traverses E1 but with a mildly higher cost
-    unv_cost = unv_data["paths"][0]["total_cost"]
+    unv_cost = res_unverified.json()["paths"][0]["total_cost"]
     assert unv_cost > clean_cost
+
+
+def test_fastest_vs_safest_diverges_when_hazard_on_fastest_route():
+    """
+    Isolated test fixture:
+    - Fastest path N1 -> N8 via E1 (short, fast) has an active flooded_road hazard (Yellow/Red).
+    - Alternative path N1 -> N9 -> N8 via E11, E12 (longer) has no hazards (Green).
+    Under objective='fastest', Rank 1 picks the shortest travel time (via E1).
+    Under objective='safest', Rank 1 avoids the hazard and picks the safer corridor (via N9).
+    """
+    hazard = [
+        {
+            "edge_id": "E1",
+            "hazard_type": "flooded_road",
+            "severity": "high",
+            "status": "confirmed",
+            "confirm_count": 3,
+            "decay_factor": 1.0,
+        }
+    ]
+    fastest_res = client.post(
+        "/internal/v1/routes/compute",
+        json={
+            "request_id": "test-fastest-vs-safest-fast",
+            "source": {"node_id": "N1"},
+            "destination": {"node_id": "N8"},
+            "vehicle": {"profile_id": "car"},
+            "objective": "fastest",
+            "k": 3,
+            "hazard_context": hazard,
+        },
+    )
+    assert fastest_res.status_code == 200
+    fastest_edges = [e["edge_id"] for e in fastest_res.json()["paths"][0]["edges"]]
+
+    safest_res = client.post(
+        "/internal/v1/routes/compute",
+        json={
+            "request_id": "test-fastest-vs-safest-safe",
+            "source": {"node_id": "N1"},
+            "destination": {"node_id": "N8"},
+            "vehicle": {"profile_id": "car"},
+            "objective": "safest",
+            "k": 3,
+            "hazard_context": hazard,
+        },
+    )
+    assert safest_res.status_code == 200
+    safest_edges = [e["edge_id"] for e in safest_res.json()["paths"][0]["edges"]]
+
+    assert "E1" in fastest_edges, "Fastest mode must optimize travel time without hazard penalty"
+    assert "E1" not in safest_edges, "Safest mode must avoid the flooded fastest edge when a safer alternative exists"
+
+
+def test_fastest_and_safest_agree_when_no_relevant_hazards():
+    """
+    When no hazards exist on the fastest clean corridor (N1 -> N2),
+    both fastest and safest legitimately return the same optimal route.
+    """
+    fast = client.post(
+        "/internal/v1/routes/compute",
+        json={"request_id": "t-agree-f", "source": {"node_id": "N1"}, "destination": {"node_id": "N2"}, "vehicle": {"profile_id": "car"}, "objective": "fastest"},
+    ).json()
+    safe = client.post(
+        "/internal/v1/routes/compute",
+        json={"request_id": "t-agree-s", "source": {"node_id": "N1"}, "destination": {"node_id": "N2"}, "vehicle": {"profile_id": "car"}, "objective": "safest"},
+    ).json()
+    assert fast["paths"][0]["nodes"] == safe["paths"][0]["nodes"]
+
 
 

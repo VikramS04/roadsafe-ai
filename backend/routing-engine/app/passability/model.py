@@ -184,9 +184,10 @@ def calculate_edge_cost(
     gamma = cfg["gamma"]
 
     if objective.lower() == "fastest":
-        alpha = alpha * 2.5
-        beta = beta * 0.3
-        gamma = gamma * 0.5
+        # Optimize purely for estimated travel time (no hazard/risk penalty)
+        alpha = 1.0
+        beta = 0.0
+        gamma = 0.0
     else:  # "safest" is default
         alpha = alpha * 0.15
         beta = beta * 6.0

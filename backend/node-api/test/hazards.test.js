@@ -164,4 +164,83 @@ describe('Community Hazards & Voting Unit Tests', () => {
     const decayExpired = Math.max(0, Math.min(1.0, 1.0 - (expiredAge / lifespanMs)));
     assert.strictEqual(decayExpired, 0.0);
   });
+
+  test('6. HTTP /hazards/:id/vote enforces proximity coordinates, 5km radius, duplicate check, and tracks disputeCount', async () => {
+    const apiBase = process.env.API_URL || 'http://127.0.0.1:3000/api/v1';
+    const httpReportId = 'test-hazard-http-' + Date.now();
+    const httpVoter = 'device-http-voter-' + Date.now();
+    const expiresAt = new Date(Date.now() + 6 * 3600 * 1000);
+
+    await prisma.deviceProfile.upsert({
+      where: { deviceId: httpVoter },
+      update: {},
+      create: { deviceId: httpVoter, reliabilityScore: 1.0 },
+    });
+
+    await prisma.hazardReport.create({
+      data: {
+        id: httpReportId,
+        type: 'flooded_road',
+        severity: 'medium',
+        lat: 25.5788,
+        lng: 91.8933,
+        status: 'unverified',
+        confirmCount: 0,
+        clearCount: 0,
+        deviceId: reporterDeviceId,
+        expiresAt,
+      },
+    });
+
+    try {
+      // Missing GPS coordinates must be rejected (400), never bypass proximity
+      const missingLocRes = await fetch(`${apiBase}/hazards/${httpReportId}/vote`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-device-id': httpVoter },
+        body: JSON.stringify({ vote: 'no' }),
+      });
+      assert.strictEqual(missingLocRes.status, 400);
+
+      // Out-of-range coordinates (> 5 km) must be rejected (403)
+      const farRes = await fetch(`${apiBase}/hazards/${httpReportId}/vote`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-device-id': httpVoter },
+        body: JSON.stringify({ vote: 'no', voter_latitude: 26.9124, voter_longitude: 75.7873 }),
+      });
+      assert.strictEqual(farRes.status, 403);
+
+      // Nearby dispute ("no") vote succeeds and increments disputeCount
+      const okRes = await fetch(`${apiBase}/hazards/${httpReportId}/vote`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-device-id': httpVoter },
+        body: JSON.stringify({ vote: 'no', voter_latitude: 25.579, voter_longitude: 91.8935 }),
+      });
+      assert.strictEqual(okRes.status, 200);
+      const okBody = await okRes.json();
+      assert.strictEqual(okBody.disputeCount, 1);
+      assert.strictEqual(okBody.userVote, 'no');
+
+      // Duplicate vote from same device must be rejected (409)
+      const dupRes = await fetch(`${apiBase}/hazards/${httpReportId}/vote`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-device-id': httpVoter },
+        body: JSON.stringify({ vote: 'yes', voter_latitude: 25.579, voter_longitude: 91.8935 }),
+      });
+      assert.strictEqual(dupRes.status, 409);
+
+      // GET /hazards/:id returns disputeCount and caller's userVote
+      const getRes = await fetch(`${apiBase}/hazards/${httpReportId}`, {
+        headers: { 'x-device-id': httpVoter },
+      });
+      assert.strictEqual(getRes.status, 200);
+      const getBody = await getRes.json();
+      assert.strictEqual(getBody.hazard.disputeCount, 1);
+      assert.strictEqual(getBody.hazard.userVote, 'no');
+    } finally {
+      await prisma.hazardEvent.deleteMany({ where: { reportId: httpReportId } }).catch(() => {});
+      await prisma.hazardVote.deleteMany({ where: { reportId: httpReportId } }).catch(() => {});
+      await prisma.hazardReport.deleteMany({ where: { id: httpReportId } }).catch(() => {});
+      await prisma.deviceProfile.deleteMany({ where: { deviceId: httpVoter } }).catch(() => {});
+    }
+  });
 });

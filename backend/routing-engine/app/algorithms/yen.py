@@ -43,18 +43,17 @@ def compute_k_shortest_paths(
     # Compute weights and passabilities on working copy
     weighted = active_graph.copy()
     for u, v, data in weighted.edges(data=True):
-        safety = data.get("safety_score")
-        if safety is None:
-            safety, _, risk_band, _ = calculate_passability(
-                vehicle_profile=vehicle_profile,
-                rainfall_norm=data.get("rainfall_norm", 0.0),
-                slope_norm=data.get("slope_norm", 0.0),
-                landslide_risk=data.get("landslide_risk", 0.0),
-                surface_damage=data.get("surface_damage", 0.0),
-                narrowness_norm=data.get("narrowness_norm", 0.0),
-            )
-            data["safety_score"] = safety
-            data["risk_band"] = risk_band
+        safety, _, risk_band, _ = calculate_passability(
+            vehicle_profile=vehicle_profile,
+            rainfall_norm=data.get("rainfall_norm") or 0.0,
+            slope_norm=data.get("slope_norm") or 0.0,
+            landslide_risk=data.get("landslide_risk") or 0.0,
+            surface_damage=data.get("surface_damage") or 0.0,
+            waterlogging_norm=data.get("waterlogging_norm") or 0.0,
+            narrowness_norm=data.get("narrowness_norm") or 0.0,
+        )
+        data["safety_score"] = safety
+        data["risk_band"] = risk_band
 
         total_cost, cost_bd = calculate_edge_cost(
             base_travel_time_min=data.get("base_travel_time_min", 1.0),
@@ -82,7 +81,7 @@ def compute_k_shortest_paths(
         if not candidate_node_lists:
             break
         prev_path = candidate_node_lists[-1]
-        if len(prev_path) < 4:
+        if len(prev_path) < 2:
             break
 
         prev_edges = list(zip(prev_path, prev_path[1:]))
@@ -186,6 +185,7 @@ def compute_k_shortest_paths(
             "total_cost": round(total_path_cost, 4),
             "estimated_travel_minutes": round(total_travel_min, 1),
             "composite_safety_score": round(min_safety_along_path, 4),
+            "hazard_exposure": round(sum((1.0 - e["safety_score"]) * max(0.05, e["distance_km"]) for e in edge_details), 4),
             "nodes": node_list,
             "edges": edge_details,
             "bottleneck": bottleneck_edge,
@@ -197,15 +197,10 @@ def compute_k_shortest_paths(
     if objective.lower() == "fastest":
         candidate_paths.sort(key=lambda p: (
             p["estimated_travel_minutes"],
-            -p["composite_safety_score"],
             p["total_cost"]
         ))
     else:
-        # Default "safest": Best safety outcome among feasible routes with Detour Cap
-        # Rule 1: A Red route (safety < 0.50) is NEVER prioritized over Green or Yellow
-        # Rule 2: Green (>0.80) vs Yellow (0.50-0.79):
-        # A safer route is preferred over a faster one only if extra time is <= 35% or <= 30 min,
-        # unless the faster route contains a Red segment.
+        # Default "safest": Best safety outcome & lowest hazard exposure among feasible routes with Detour Cap
         min_eta = min(p["estimated_travel_minutes"] for p in candidate_paths)
 
         def safest_with_detour_cap_key(p):
@@ -217,13 +212,12 @@ def compute_k_shortest_paths(
             extra_eta_pct = (eta - min_eta) / max(1.0, min_eta)
             absurd_detour = (extra_eta_pct > 0.35 and (eta - min_eta) > 25.0)
 
-            # If absurd detour for a non-red route, penalize tier
             effective_tier = tier
             if absurd_detour and not is_red and tier == 3:
-                effective_tier = 2.5  # Slightly behind a feasible fast route if detour is absurd
+                effective_tier = 2.5
 
             safety_bin = round(score, 2)
-            return (-effective_tier, -safety_bin, eta, p["total_cost"])
+            return (-effective_tier, -safety_bin, p["hazard_exposure"], eta, p["total_cost"])
 
         candidate_paths.sort(key=safest_with_detour_cap_key)
 

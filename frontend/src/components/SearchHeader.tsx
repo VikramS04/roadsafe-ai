@@ -21,6 +21,7 @@ interface FieldState {
   query: string;
   suggestions: GeocodeResult[];
   isOpen: boolean;
+  highlightedIndex: number;
 }
 
 const VEHICLES = [
@@ -49,12 +50,14 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
     query: currentOriginName,
     suggestions: [],
     isOpen: false,
+    highlightedIndex: -1,
   });
 
   const [destField, setDestField] = useState<FieldState>({
     query: currentDestinationName,
     suggestions: [],
     isOpen: false,
+    highlightedIndex: -1,
   });
 
   // Independent timers, AbortControllers, and request IDs per field
@@ -67,19 +70,19 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
   const containerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    setOriginField({ query: currentOriginName, suggestions: [], isOpen: false });
+    setOriginField({ query: currentOriginName, suggestions: [], isOpen: false, highlightedIndex: -1 });
   }, [currentOriginName]);
 
   useEffect(() => {
-    setDestField({ query: currentDestinationName, suggestions: [], isOpen: false });
+    setDestField({ query: currentDestinationName, suggestions: [], isOpen: false, highlightedIndex: -1 });
   }, [currentDestinationName]);
 
   // Close dropdowns on outside click
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
-        setOriginField((prev) => ({ ...prev, isOpen: false, suggestions: [] }));
-        setDestField((prev) => ({ ...prev, isOpen: false, suggestions: [] }));
+        setOriginField((prev) => ({ ...prev, isOpen: false, suggestions: [], highlightedIndex: -1 }));
+        setDestField((prev) => ({ ...prev, isOpen: false, suggestions: [], highlightedIndex: -1 }));
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
@@ -116,16 +119,16 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
     const reqIdRef = field === 'origin' ? originReqIdRef : destReqIdRef;
 
     // Close the other field's dropdown immediately
-    setOtherField((prev) => ({ ...prev, isOpen: false }));
+    setOtherField((prev) => ({ ...prev, isOpen: false, highlightedIndex: -1 }));
     cancelFieldRequests(field);
 
     const trimmed = text.trim();
     if (trimmed.length < 2) {
-      setField({ query: text, suggestions: [], isOpen: false });
+      setField({ query: text, suggestions: [], isOpen: false, highlightedIndex: -1 });
       return;
     }
 
-    setField((prev) => ({ ...prev, query: text, isOpen: true }));
+    setField((prev) => ({ ...prev, query: text, isOpen: true, highlightedIndex: -1 }));
     const reqId = reqIdRef.current;
 
     timeoutRef.current = setTimeout(async () => {
@@ -137,12 +140,12 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
         const results = res.results || [];
         setField((prev) =>
           reqId === reqIdRef.current
-            ? { ...prev, suggestions: results, isOpen: results.length > 0 }
+            ? { ...prev, suggestions: results, isOpen: results.length > 0, highlightedIndex: -1 }
             : prev
         );
       } catch (err: any) {
         if (err?.name === 'AbortError' || reqId !== reqIdRef.current) return;
-        setField((prev) => ({ ...prev, suggestions: [], isOpen: false }));
+        setField((prev) => ({ ...prev, suggestions: [], isOpen: false, highlightedIndex: -1 }));
       }
     }, 200);
   };
@@ -150,7 +153,7 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
   const selectPlace = (place: GeocodeResult, field: 'origin' | 'dest') => {
     cancelFieldRequests(field);
     if (field === 'origin') {
-      setOriginField({ query: place.name, suggestions: [], isOpen: false });
+      setOriginField({ query: place.name, suggestions: [], isOpen: false, highlightedIndex: -1 });
       onSelectOrigin({
         name: place.name,
         nodeId: place.node_id,
@@ -158,7 +161,7 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
         lng: place.lng,
       });
     } else {
-      setDestField({ query: place.name, suggestions: [], isOpen: false });
+      setDestField({ query: place.name, suggestions: [], isOpen: false, highlightedIndex: -1 });
       onSelectDestination({
         name: place.name,
         nodeId: place.node_id,
@@ -171,9 +174,40 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
   const closeField = (field: 'origin' | 'dest') => {
     cancelFieldRequests(field);
     if (field === 'origin') {
-      setOriginField((prev) => ({ ...prev, isOpen: false, suggestions: [] }));
+      setOriginField((prev) => ({ ...prev, isOpen: false, suggestions: [], highlightedIndex: -1 }));
     } else {
-      setDestField((prev) => ({ ...prev, isOpen: false, suggestions: [] }));
+      setDestField((prev) => ({ ...prev, isOpen: false, suggestions: [], highlightedIndex: -1 }));
+    }
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>, field: 'origin' | 'dest') => {
+    const state = field === 'origin' ? originField : destField;
+    const setField = field === 'origin' ? setOriginField : setDestField;
+
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeField(field);
+      return;
+    }
+
+    if (!state.isOpen || state.suggestions.length === 0) return;
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setField((prev) => ({
+        ...prev,
+        highlightedIndex: prev.highlightedIndex < prev.suggestions.length - 1 ? prev.highlightedIndex + 1 : 0,
+      }));
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setField((prev) => ({
+        ...prev,
+        highlightedIndex: prev.highlightedIndex > 0 ? prev.highlightedIndex - 1 : prev.suggestions.length - 1,
+      }));
+    } else if (e.key === 'Enter' && state.highlightedIndex >= 0) {
+      e.preventDefault();
+      const chosen = state.suggestions[state.highlightedIndex];
+      if (chosen) selectPlace(chosen, field);
     }
   };
 
@@ -211,10 +245,10 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
         </div>
 
         {/* Origin & Destination Search Rows with Swap Button */}
-        <div className="flex items-center gap-2 relative">
+        <div className="flex items-center gap-2 relative z-30">
           <div className="flex-1 flex flex-col gap-1.5">
             {/* Origin Input */}
-            <div className="relative">
+            <div className={`relative ${originField.isOpen ? 'z-50' : 'z-10'}`}>
               <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-950/90 border border-slate-700/70 focus-within:border-emerald-500 focus-within:ring-1 focus-within:ring-emerald-500/20 text-xs">
                 <span className="text-emerald-400 font-bold text-sm">🟢</span>
                 <input
@@ -223,11 +257,9 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
                   placeholder="Start location / Origin..."
                   value={originField.query}
                   onChange={(e) => handleSearch(e.target.value, 'origin')}
-                  onFocus={() => setDestField((prev) => ({ ...prev, isOpen: false, suggestions: [] }))}
+                  onFocus={() => setDestField((prev) => ({ ...prev, isOpen: false, suggestions: [], highlightedIndex: -1 }))}
                   onBlur={() => closeField('origin')}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Escape') closeField('origin');
-                  }}
+                  onKeyDown={(e) => handleKeyDown(e, 'origin')}
                   className="bg-transparent text-xs text-slate-100 placeholder-slate-400 w-full focus:outline-none font-medium"
                 />
                 {originField.query && (
@@ -237,7 +269,7 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
                     onMouseDown={(e) => e.preventDefault()}
                     onClick={() => {
                       cancelFieldRequests('origin');
-                      setOriginField({ query: '', suggestions: [], isOpen: false });
+                      setOriginField({ query: '', suggestions: [], isOpen: false, highlightedIndex: -1 });
                     }}
                     className="text-slate-400 hover:text-slate-200 text-xs font-bold"
                   >
@@ -250,24 +282,35 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
                 <div
                   role="listbox"
                   aria-label="Origin suggestions"
-                  className="absolute top-full left-0 right-0 mt-1 bg-slate-900/98 border border-slate-700 rounded-xl shadow-2xl max-h-48 overflow-y-auto z-50 divide-y divide-slate-800"
+                  className="absolute top-full left-0 right-0 mt-1.5 bg-slate-900 border border-slate-600 rounded-xl shadow-[0_16px_40px_rgba(0,0,0,0.85)] max-h-56 overflow-y-auto z-[1300] divide-y divide-slate-800"
                 >
-                  {originField.suggestions.map((item) => (
+                  {originField.suggestions.map((item, idx) => (
                     <div
                       key={`orig-${item.place_id}`}
                       role="option"
-                      onMouseDown={(e) => e.preventDefault()}
-                      onClick={() => selectPlace(item, 'origin')}
-                      className="p-2 hover:bg-slate-800 cursor-pointer flex items-center justify-between text-left text-xs transition"
+                      aria-selected={idx === originField.highlightedIndex}
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                      }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        selectPlace(item, 'origin');
+                      }}
+                      className={`p-2.5 cursor-pointer flex items-center justify-between text-left text-xs transition ${
+                        idx === originField.highlightedIndex
+                          ? 'bg-slate-800 text-white'
+                          : 'bg-slate-900 text-slate-100 hover:bg-slate-800'
+                      }`}
                     >
-                      <span className="font-semibold text-slate-100 truncate pr-2">{item.name}</span>
+                      <span className="font-semibold text-white truncate pr-2">{item.name}</span>
                       <span
-                        className={`text-[10px] whitespace-nowrap ${
+                        className={`text-[10px] font-medium whitespace-nowrap ${
                           item.coverage_zone === 'local_hazard_aware'
                             ? 'text-emerald-400'
                             : item.coverage_zone === 'regional_hazards'
                             ? 'text-amber-400'
-                            : 'text-slate-400'
+                            : 'text-slate-300'
                         }`}
                       >
                         {item.coverage_zone === 'local_hazard_aware'
@@ -283,7 +326,7 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
             </div>
 
             {/* Destination Input */}
-            <div className="relative">
+            <div className={`relative ${destField.isOpen ? 'z-50' : 'z-10'}`}>
               <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-950/90 border border-slate-700/70 focus-within:border-rose-500 focus-within:ring-1 focus-within:ring-rose-500/20 text-xs">
                 <span className="text-rose-500 font-bold text-sm">🏁</span>
                 <input
@@ -292,11 +335,9 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
                   placeholder="Destination (e.g. Cherrapunji, Dawki)..."
                   value={destField.query}
                   onChange={(e) => handleSearch(e.target.value, 'dest')}
-                  onFocus={() => setOriginField((prev) => ({ ...prev, isOpen: false, suggestions: [] }))}
+                  onFocus={() => setOriginField((prev) => ({ ...prev, isOpen: false, suggestions: [], highlightedIndex: -1 }))}
                   onBlur={() => closeField('dest')}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Escape') closeField('dest');
-                  }}
+                  onKeyDown={(e) => handleKeyDown(e, 'dest')}
                   className="bg-transparent text-xs text-slate-100 placeholder-slate-400 w-full focus:outline-none font-medium"
                 />
                 {destField.query && (
@@ -306,7 +347,7 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
                     onMouseDown={(e) => e.preventDefault()}
                     onClick={() => {
                       cancelFieldRequests('dest');
-                      setDestField({ query: '', suggestions: [], isOpen: false });
+                      setDestField({ query: '', suggestions: [], isOpen: false, highlightedIndex: -1 });
                     }}
                     className="text-slate-400 hover:text-slate-200 text-xs font-bold"
                   >
@@ -319,24 +360,35 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
                 <div
                   role="listbox"
                   aria-label="Destination suggestions"
-                  className="absolute top-full left-0 right-0 mt-1 bg-slate-900/98 border border-slate-700 rounded-xl shadow-2xl max-h-48 overflow-y-auto z-50 divide-y divide-slate-800"
+                  className="absolute top-full left-0 right-0 mt-1.5 bg-slate-900 border border-slate-600 rounded-xl shadow-[0_16px_40px_rgba(0,0,0,0.85)] max-h-56 overflow-y-auto z-[1300] divide-y divide-slate-800"
                 >
-                  {destField.suggestions.map((item) => (
+                  {destField.suggestions.map((item, idx) => (
                     <div
                       key={`dest-${item.place_id}`}
                       role="option"
-                      onMouseDown={(e) => e.preventDefault()}
-                      onClick={() => selectPlace(item, 'dest')}
-                      className="p-2 hover:bg-slate-800 cursor-pointer flex items-center justify-between text-left text-xs transition"
+                      aria-selected={idx === destField.highlightedIndex}
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                      }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        selectPlace(item, 'dest');
+                      }}
+                      className={`p-2.5 cursor-pointer flex items-center justify-between text-left text-xs transition ${
+                        idx === destField.highlightedIndex
+                          ? 'bg-slate-800 text-white'
+                          : 'bg-slate-900 text-slate-100 hover:bg-slate-800'
+                      }`}
                     >
-                      <span className="font-semibold text-slate-100 truncate pr-2">{item.name}</span>
+                      <span className="font-semibold text-white truncate pr-2">{item.name}</span>
                       <span
-                        className={`text-[10px] whitespace-nowrap ${
+                        className={`text-[10px] font-medium whitespace-nowrap ${
                           item.coverage_zone === 'local_hazard_aware'
                             ? 'text-emerald-400'
                             : item.coverage_zone === 'regional_hazards'
                             ? 'text-amber-400'
-                            : 'text-slate-400'
+                            : 'text-slate-300'
                         }`}
                       >
                         {item.coverage_zone === 'local_hazard_aware'
@@ -420,8 +472,8 @@ export const SearchHeader: React.FC<SearchHeaderProps> = ({
             onClick={onSearchRoute}
             className="flex-1 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white text-xs font-bold py-2 px-3 rounded-xl shadow-lg transition flex items-center justify-center gap-1.5 active:scale-95"
           >
-            <span>🧭</span>
-            <span>Find Safest Route</span>
+            <span>{objective === 'fastest' ? '⚡' : '🧭'}</span>
+            <span>{objective === 'fastest' ? 'Find Fastest Route' : 'Find Safest Route'}</span>
           </button>
         </div>
       </div>

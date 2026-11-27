@@ -40,7 +40,7 @@ export const App: React.FC = () => {
   const [conditions, setConditions] = useState<ConditionsResponse | null>(null);
 
   // Live GPS Geolocation Engine (Google Maps style)
-  const { locationState, startTracking, stopTracking, setFollowing } = useLiveLocation();
+  const { locationState, startTracking, stopTracking, retryTracking, setFollowing } = useLiveLocation();
 
   // User GPS
   const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
@@ -437,12 +437,20 @@ export const App: React.FC = () => {
         }}
       />
 
-      {/* 7. Hazard Confirmation Card ("Still There? [Yes] [No] [Cleared]") */}
+      {/* 7. Hazard Confirmation Card ("Confirm / Dispute / Cleared") */}
       <HazardConfirmationCard
-        hazard={selectedHazard}
+        hazard={selectedHazard ? hazards.find((h) => h.id === selectedHazard.id) || selectedHazard : null}
         onClose={() => setSelectedHazard(null)}
         userLocation={userLocation}
-        onVoteCast={() => {
+        locationError={locationState.error}
+        onRetryLocation={retryTracking}
+        onVoteCast={(updatedReport) => {
+          if (updatedReport) {
+            setSelectedHazard(updatedReport);
+            setHazards((prev) =>
+              prev.map((h) => (h.id === updatedReport.id ? { ...h, ...updatedReport } : h))
+            );
+          }
           loadData();
           triggerRoutePlan();
         }}

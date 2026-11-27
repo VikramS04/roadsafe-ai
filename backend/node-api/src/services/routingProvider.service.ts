@@ -36,10 +36,11 @@ export async function computeBroadOsrmRoute(params: {
   origin: { lat: number; lng: number };
   destination: { lat: number; lng: number };
   vehicleType: string;
+  objective?: 'fastest' | 'safest';
   activeHazards: any[];
   k?: number;
 }) {
-  const { origin, destination, vehicleType, activeHazards, k = 3 } = params;
+  const { origin, destination, vehicleType, objective = 'safest', activeHazards, k = 3 } = params;
   const url = `${OSRM_BASE_URL}/route/v1/driving/${origin.lng},${origin.lat};${destination.lng},${destination.lat}?overview=full&geometries=geojson&steps=true&alternatives=${k > 1 ? 'true' : 'false'}`;
 
   const controller = new AbortController();
@@ -68,19 +69,27 @@ export async function computeBroadOsrmRoute(params: {
   const sourceStatuses = await getHazardSourceStatuses().catch(() => []);
   const anySourceUnavailable = sourceStatuses.length === 0 || sourceStatuses.some((s) => s.status === 'unavailable');
 
-  const routes = osrmJson.routes.slice(0, k).map((r: any, idx: number) => {
+  const severityWeight = (sev: string) =>
+    sev === 'critical' ? 4 : sev === 'high' ? 3 : sev === 'medium' ? 2 : 1;
+
+  const candidateRoutes = osrmJson.routes.slice(0, Math.max(k, 3)).map((r: any, idx: number) => {
     const coords: number[][] = r.geometry?.coordinates || [];
     const steps: any[] = r.legs?.[0]?.steps || [];
     const totalDistKm = Number(((r.distance || 0) / 1000).toFixed(1));
     const totalMin = Number(((r.duration || 0) / 60).toFixed(1));
 
-    // Check which active hazards lie within 10km of any sampled route vertex
-    const sampleStep = Math.max(1, Math.floor(coords.length / 60));
+    // Check which active hazards lie within 3km of any sampled route vertex
+    const sampleStep = Math.max(1, Math.floor(coords.length / 80));
     const sampledCoords = coords.filter((_, i) => i % sampleStep === 0);
     const nearbyHazards = activeHazards.filter((h) =>
       sampledCoords.some(
-        (c) => calculateHaversineDistanceMeters(h.lat, h.lng, c[1], c[0]) <= 10000
+        (c) => calculateHaversineDistanceMeters(h.lat, h.lng, c[1], c[0]) <= 3000
       )
+    );
+
+    const hazardExposure = nearbyHazards.reduce(
+      (sum, h) => sum + severityWeight(h.severity) * (h.decayFactor ?? 1.0),
+      0
     );
 
     const edges = steps.map((st: any, sIdx: number) => {
@@ -122,13 +131,13 @@ export async function computeBroadOsrmRoute(params: {
     const band = minSafety < 0.5 ? 'Red' : minSafety < 0.8 ? 'Yellow' : 'Green';
 
     return {
-      rank: idx + 1,
-      is_recommended: idx === 0,
-      total_cost: r.duration || 0,
+      total_cost: objective === 'fastest' ? totalMin : totalMin + hazardExposure * 15,
       estimated_travel_minutes: totalMin,
       distance_km: totalDistKm,
       composite_safety_score: Number(minSafety.toFixed(2)),
       safety_band: band,
+      hazard_exposure: Number(hazardExposure.toFixed(2)),
+      nearby_hazard_count: nearbyHazards.length,
       nodes: [],
       edges,
       bottleneck:
@@ -144,11 +153,28 @@ export async function computeBroadOsrmRoute(params: {
       coordinates: coords,
       turn_instructions: turnInstructions,
       rationale:
-        nearbyHazards.length > 0
-          ? `Ordinary driving route via OSRM (${totalDistKm} km, ${Math.round(totalMin)} min). ${nearbyHazards.length} active regional/community hazard(s) detected near this corridor.`
-          : `Ordinary driving route via OSRM (${totalDistKm} km, ${Math.round(totalMin)} min). Outside local East Khasi Hills road-hazard graph; not fully hazard-verified.`,
+        objective === 'fastest'
+          ? `Fastest driving route via OSRM (${totalDistKm} km, ${Math.round(totalMin)} min), optimized purely for travel time.`
+          : nearbyHazards.length > 0
+          ? `Route passes near ${nearbyHazards.length} active hazard(s); no lower-exposure OSRM alternative was available or preferred.`
+          : `Ordinary driving route via OSRM (${totalDistKm} km, ${Math.round(totalMin)} min). No hazards reported by checked sources along this corridor, but local road coverage is incomplete.`,
     };
   });
+
+  if (objective === 'fastest') {
+    candidateRoutes.sort((a: any, b: any) => a.estimated_travel_minutes - b.estimated_travel_minutes);
+  } else {
+    candidateRoutes.sort(
+      (a: any, b: any) =>
+        a.hazard_exposure - b.hazard_exposure || a.estimated_travel_minutes - b.estimated_travel_minutes
+    );
+  }
+
+  const routes = candidateRoutes.slice(0, k).map((r: any, idx: number) => ({
+    ...r,
+    rank: idx + 1,
+    is_recommended: idx === 0,
+  }));
 
   const vehicleLimitations =
     vehicleType !== 'car'

@@ -106,6 +106,7 @@ router.post('/', deviceAuth, async (req: Request, res: Response): Promise<void> 
           origin: { lat: Number(origin.lat), lng: Number(origin.lng) },
           destination: { lat: Number(destination.lat), lng: Number(destination.lng) },
           vehicleType: vehicle.type,
+          objective: objective === 'fastest' ? 'fastest' : 'safest',
           activeHazards,
           k: Math.min(3, Math.max(1, Number(k) || 3)),
         });

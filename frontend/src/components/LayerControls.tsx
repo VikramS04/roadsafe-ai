@@ -38,6 +38,13 @@ export const LayerControls: React.FC<LayerControlsProps> = ({
         </div>
       )}
 
+      {/* Discovery hint near hazard/report controls */}
+      {showHazards && (
+        <div className="hidden sm:block bg-slate-900/90 backdrop-blur-md border border-slate-700/80 rounded-xl px-2.5 py-1.5 text-[11px] text-slate-300 shadow-lg max-w-[230px] text-right">
+          Select a hazard marker to view details and confirm it.
+        </div>
+      )}
+
       {/* Floating Action Button: Report a Hazard (2-tap) */}
       <button
         onClick={onOpenReport}

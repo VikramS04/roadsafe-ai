@@ -149,4 +149,38 @@ describe('SearchHeader Place Name Isolation (Task 2)', () => {
     expect(screen.queryByText('Pynursla')).not.toBeInTheDocument();
     expect(screen.getByText('Report a Road Hazard')).toBeInTheDocument();
   });
+
+  it('renders opaque high-z-index dropdown and supports keyboard ArrowDown + Enter selection', async () => {
+    (api.geocode as any).mockResolvedValueOnce({
+      results: [
+        { place_id: 'p4', name: 'Jaipur Junction', display_name: 'Jaipur, RJ', lat: 26.91, lng: 75.78, coverage_zone: 'regional_hazards' },
+        { place_id: 'p5', name: 'Jaipur Airport', display_name: 'Jaipur Airport, RJ', lat: 26.82, lng: 75.81, coverage_zone: 'regional_hazards' },
+      ],
+    });
+
+    render(<SearchHeader {...defaultProps} />);
+    const destInput = screen.getByLabelText('Destination location') as HTMLInputElement;
+    fireEvent.focus(destInput);
+    fireEvent.change(destInput, { target: { value: 'Jaipur' } });
+
+    await act(async () => {
+      vi.advanceTimersByTime(250);
+    });
+
+    const listbox = await screen.findByRole('listbox', { name: 'Destination suggestions' });
+    expect(listbox.className).toContain('bg-slate-900');
+    expect(listbox.className).not.toContain('bg-slate-900/98');
+    expect(listbox.className).toContain('z-[1300]');
+
+    // ArrowDown twice -> highlights "Jaipur Airport", Enter selects it
+    fireEvent.keyDown(destInput, { key: 'ArrowDown' });
+    fireEvent.keyDown(destInput, { key: 'ArrowDown' });
+    fireEvent.keyDown(destInput, { key: 'Enter' });
+
+    expect(destInput.value).toBe('Jaipur Airport');
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+    expect(defaultProps.onSelectDestination).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'Jaipur Airport', lat: 26.82, lng: 75.81 })
+    );
+  });
 });

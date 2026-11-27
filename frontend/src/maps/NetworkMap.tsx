@@ -491,28 +491,13 @@ export const NetworkMap: React.FC<NetworkMapProps> = ({
                 <Marker
                   position={[hazard.lat, hazard.lng]}
                   icon={getHazardIcon(hazard.type, hazard.status)}
+                  keyboard={true}
+                  title={`${hazard.type.replace(/_/g, ' ')} (${hazard.status}) — Select to view details and vote`}
+                  alt={`${hazard.type.replace(/_/g, ' ')} hazard (${sourceLabel})`}
                   eventHandlers={{
                     click: () => onSelectHazard && onSelectHazard(hazard),
                   }}
-                >
-                  <Popup className="custom-popup">
-                    <div className="p-1.5 text-slate-900 text-xs flex flex-col gap-1">
-                      <div className="font-bold text-sm capitalize">
-                        {hazard.type.replace(/_/g, ' ')}
-                      </div>
-                      <div className="text-[10px] font-bold uppercase text-blue-700">
-                        Source: {sourceLabel} {hazard.stateRegion ? `• ${hazard.stateRegion}` : ''}
-                      </div>
-                      <div className="text-[11px] font-semibold text-rose-700 uppercase">
-                        Status: {hazard.status} ({hazard.confirmCount} confirmations)
-                      </div>
-                      <div className="text-[10px] text-slate-500">
-                        Reported: {new Date(hazard.reportedAt).toLocaleString()}
-                      </div>
-                      {hazard.note && <div className="italic text-slate-700">"{hazard.note}"</div>}
-                    </div>
-                  </Popup>
-                </Marker>
+                />
               </React.Fragment>
             );
           })}

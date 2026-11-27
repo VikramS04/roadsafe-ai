@@ -38,7 +38,10 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
 
   const data = await res.json();
   if (!res.ok) {
-    throw new Error(data.message || data.error || `HTTP error ${res.status}`);
+    const err: any = new Error(data.message || data.error || `HTTP error ${res.status}`);
+    err.status = res.status;
+    err.code = data.error;
+    throw err;
   }
   return data;
 }
@@ -94,7 +97,16 @@ export const api = {
   async voteHazard(
     id: string,
     data: { vote: 'yes' | 'no' | 'cleared'; voter_latitude?: number; voter_longitude?: number }
-  ): Promise<{ message: string; statusChanged: boolean; newStatus: string; confirmCount: number; clearCount: number; report: HazardReport }> {
+  ): Promise<{
+    message: string;
+    statusChanged: boolean;
+    newStatus: string;
+    confirmCount: number;
+    disputeCount?: number;
+    clearCount: number;
+    userVote?: 'yes' | 'no' | 'cleared';
+    report: HazardReport;
+  }> {
     return request(`/hazards/${id}/vote`, {
       method: 'POST',
       body: JSON.stringify(data),
